@@ -10,10 +10,10 @@ export async function GET(
   const object = await getMedia(decodeURIComponent(key));
   if (!object) return new Response("Not found", { status: 404 });
 
-  const headers = new Headers();
-  object.writeHttpMetadata(headers);
-  headers.set("etag", object.httpEtag);
-  headers.set("Accept-Ranges", "bytes");
-  headers.set("Cache-Control", "public, max-age=31536000, immutable");
-  return new Response(object.body, { headers });
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": object.contentType,
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  });
 }

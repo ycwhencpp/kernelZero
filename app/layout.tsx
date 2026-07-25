@@ -1,23 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
-import { DM_Sans, IBM_Plex_Mono, Lora } from "next/font/google";
 import "./globals.css";
-
-const dmSans = DM_Sans({
-  variable: "--font-sans",
-  subsets: ["latin"],
-});
-
-const plexMono = IBM_Plex_Mono({
-  variable: "--font-mono",
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-});
-
-const lora = Lora({
-  variable: "--font-serif",
-  subsets: ["latin"],
-});
 
 export async function generateMetadata(): Promise<Metadata> {
   const requestHeaders = await headers();
@@ -56,9 +39,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className={`${dmSans.variable} ${plexMono.variable} ${lora.variable}`}
-      >
+      <body>
         {children}
       </body>
     </html>

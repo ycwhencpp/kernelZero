@@ -5,8 +5,8 @@ SignalCast is a personal research-intelligence and podcast studio. It discovers 
 ## What works
 
 - Five product workspaces: Discover, Daily Inbox, Library, Podcast Studio, and Tech Radar.
-- Durable D1 data for interests, sources, content, collections, episodes, evidence, feedback, and job history.
-- R2 media storage for generated MP3 files.
+- Durable Supabase Postgres data for interests, sources, content, collections, episodes, evidence, feedback, and job history.
+- Supabase Storage for generated MP3 files.
 - Live paper search across OpenAlex, Semantic Scholar, and arXiv.
 - User-approved RSS/Atom source verification and ingestion.
 - DOI/arXiv/URL/title deduplication and relevance/freshness/authority ranking.
@@ -25,6 +25,11 @@ npm install
 npm run dev
 ```
 
+Create a Supabase project, run `supabase/migrations/0001_initial.sql` in its SQL
+editor, and add `NEXT_PUBLIC_SUPABASE_URL` plus the server-only
+`SUPABASE_SERVICE_ROLE_KEY` to `.env.local`. The migration creates the required
+`podcast-media` public Storage bucket.
+
 The complete demo works without external credentials. Add `OPENAI_API_KEY` to generate full scripts and MP3 audio. Provider calls are server-only.
 
 Production variables:
@@ -34,16 +39,16 @@ Production variables:
 - `PODCAST_EMAIL` (use a dedicated public creator address)
 - `CRON_SECRET`
 - `CRON_OWNER_EMAIL`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` (server-only; never expose this in the browser)
 - Optional model, voice, title, description, budget, and authentication overrides listed in `.env.example`
 
-## Daily automation
+## Daily automation (Vercel)
 
-Schedule a durable Trigger.dev task for **05:30 Asia/Kolkata** that sends:
-
-```http
-POST /api/cron/daily
-Authorization: Bearer <CRON_SECRET>
-```
+`vercel.json` schedules `/api/cron/daily` once daily at midnight UTC (05:30
+Asia/Kolkata). Vercel sends `Authorization: Bearer <CRON_SECRET>` automatically
+when `CRON_SECRET` is configured in the Vercel project. The handler also accepts
+POST for a manual scheduler.
 
 The endpoint:
 
@@ -51,7 +56,7 @@ The endpoint:
 2. Normalizes, scores, and deduplicates results.
 3. Selects a source-diverse digest.
 4. Generates and verifies the script.
-5. Generates and stores audio when an OpenAI key and R2 are available.
+5. Generates and stores audio when an OpenAI key and Supabase Storage are available.
 6. Creates an episode in `needs_approval`.
 7. Treats the date-based job key as idempotent.
 
@@ -72,4 +77,4 @@ npm run lint
 npm test
 ```
 
-Unit tests cover canonical identities, deduplication, ranking, source diversity, RSS parsing, speech chunking, and XML escaping. The rendered-output test verifies the built product and guards against starter artifacts returning.
+Unit tests cover canonical identities, deduplication, ranking, source diversity, RSS parsing, speech chunking, and XML escaping.

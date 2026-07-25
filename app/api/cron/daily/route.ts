@@ -19,7 +19,7 @@ import {
 
 export const dynamic = "force-dynamic";
 
-export async function POST(request: Request) {
+export async function GET(request: Request) {
   const authorization = request.headers.get("authorization");
   const secret = process.env.CRON_SECRET;
   if (!secret || authorization !== `Bearer ${secret}`) {
@@ -156,3 +156,6 @@ export async function POST(request: Request) {
     );
   }
 }
+
+// Retain a POST entry point for manual schedulers and local smoke testing.
+export const POST = GET;
