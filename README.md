@@ -30,11 +30,13 @@ editor, and add `NEXT_PUBLIC_SUPABASE_URL` plus the server-only
 `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`. The migration creates the required
 `podcast-media` public Storage bucket.
 
-The complete demo works without external credentials. Add `OPENAI_API_KEY` to generate full scripts and MP3 audio. Provider calls are server-only.
+The complete demo works without external credentials. Add `GEMINI_API_KEY` or `OPENAI_API_KEY` to generate full scripts and MP3/WAV audio. With `AI_PROVIDER=auto` (default), Gemini is used when `GEMINI_API_KEY` is set. Provider calls are server-only.
 
 Production variables:
 
-- `OPENAI_API_KEY`
+- `GEMINI_API_KEY` or `OPENAI_API_KEY` (one is enough; optional `AI_PROVIDER=gemini|openai|auto`)
+- `GEMINI_TEXT_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_TTS_VOICE` (optional Gemini overrides)
+- `OPENAI_API_KEY` and OpenAI model overrides (if using OpenAI)
 - `PODCAST_BASE_URL`
 - `PODCAST_EMAIL` (use a dedicated public creator address)
 - `CRON_SECRET`

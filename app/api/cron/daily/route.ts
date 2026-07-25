@@ -5,7 +5,7 @@ import {
   scoreCandidate,
   selectDigestItems,
 } from "../../../../lib/domain";
-import { generatePodcast } from "../../../../lib/openai";
+import { generatePodcast, resolveAiProvider, estimatedGenerationCostUsd } from "../../../../lib/openai";
 import { discoverResearch } from "../../../../lib/research";
 import { fetchFeed } from "../../../../lib/rss";
 import {
@@ -53,7 +53,7 @@ export async function GET(request: Request) {
       ),
     });
   }
-  const estimatedCostUsd = process.env.OPENAI_API_KEY ? 0.2 : 0;
+  const estimatedCostUsd = estimatedGenerationCostUsd(resolveAiProvider(), true);
   if (
     !hasBudgetForGeneration(
       initialState.stats.dailySpendUsd,
@@ -73,7 +73,7 @@ export async function GET(request: Request) {
     id: jobId,
     stage: "Daily research and digest",
     status: "running",
-    provider: "OpenAlex + Semantic Scholar + arXiv + OpenAI",
+    provider: "OpenAlex + Semantic Scholar + arXiv + AI",
   });
 
   try {
@@ -128,13 +128,14 @@ export async function GET(request: Request) {
       generated.evidence,
       generated.audio,
       new URL(request.url).origin,
+      generated.audioContentType ?? undefined,
     );
     await recordJob(ownerId, {
       id: jobId,
       stage: "Daily research and digest",
       status: "completed",
-      provider: generated.provider === "openai" ? "OpenAI" : "Demo generator",
-      costUsd: generated.provider === "openai" ? estimatedCostUsd : 0,
+      provider: generated.provider === "openai" ? "OpenAI" : generated.provider === "gemini" ? "Gemini" : "Demo generator",
+      costUsd: generated.provider === "demo" ? 0 : estimatedCostUsd,
     });
 
     return Response.json({

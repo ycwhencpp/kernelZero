@@ -21,7 +21,7 @@ export async function GET(request: Request) {
   <guid isPermaLink="false">${escapeXml(episode.immutableGuid)}</guid>
   <link>${escapeXml(`${baseUrl}/?episode=${episode.id}`)}</link>
   <pubDate>${new Date(episode.publishedAt || episode.createdAt).toUTCString()}</pubDate>
-  <enclosure url="${escapeXml(episode.audioUrl || "")}" length="${episode.audioBytes ?? 0}" type="audio/mpeg" />
+  <enclosure url="${escapeXml(episode.audioUrl || "")}" length="${episode.audioBytes ?? 0}" type="${episode.audioKey?.endsWith(".wav") ? "audio/wav" : "audio/mpeg"}" />
   <itunes:duration>${formatDuration(episode.durationSeconds)}</itunes:duration>
   <itunes:episodeType>full</itunes:episodeType>
   <podcast:transcript url="${escapeXml(`${baseUrl}/api/transcripts/${episode.id}`)}" type="text/plain" />

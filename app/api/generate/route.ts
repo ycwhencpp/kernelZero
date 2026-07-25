@@ -3,7 +3,12 @@ import {
   hasBudgetForGeneration,
   selectDigestItems,
 } from "../../../lib/domain";
-import { generatePodcast } from "../../../lib/openai";
+import {
+  aiProviderLabel,
+  estimatedGenerationCostUsd,
+  generatePodcast,
+  resolveAiProvider,
+} from "../../../lib/openai";
 import {
   createEpisode,
   findItems,
@@ -25,8 +30,11 @@ export async function POST(request: Request) {
     };
     const type = body.type ?? "paper_deep_dive";
     const state = await getDashboardState(ownerId);
-    const estimatedCostUsd =
-      process.env.OPENAI_API_KEY && (body.includeAudio ?? true) ? 0.16 : 0;
+    const provider = resolveAiProvider();
+    const estimatedCostUsd = estimatedGenerationCostUsd(
+      provider,
+      body.includeAudio ?? true,
+    );
     if (
       !hasBudgetForGeneration(
         state.stats.dailySpendUsd,
@@ -56,7 +64,7 @@ export async function POST(request: Request) {
       id: jobId,
       stage: type === "daily_digest" ? "Daily digest" : "Deep-dive podcast",
       status: "running",
-      provider: process.env.OPENAI_API_KEY ? "OpenAI" : "Demo generator",
+      provider: aiProviderLabel(provider),
     });
     const generated = await generatePodcast(items, type, {
       includeAudio: body.includeAudio ?? true,
@@ -67,13 +75,14 @@ export async function POST(request: Request) {
       generated.evidence,
       generated.audio,
       new URL(request.url).origin,
+      generated.audioContentType ?? undefined,
     );
     await recordJob(ownerId, {
       id: jobId,
       stage: type === "daily_digest" ? "Daily digest" : "Deep-dive podcast",
       status: "completed",
-      provider: generated.provider === "openai" ? "OpenAI" : "Demo generator",
-      costUsd: generated.provider === "openai" ? estimatedCostUsd : 0,
+      provider: aiProviderLabel(generated.provider === "demo" ? null : generated.provider),
+      costUsd: generated.provider === "demo" ? 0 : estimatedCostUsd,
     });
 
     return Response.json({
@@ -88,7 +97,7 @@ export async function POST(request: Request) {
         id: jobId,
         stage: "Podcast generation",
         status: "failed",
-        provider: process.env.OPENAI_API_KEY ? "OpenAI" : "Demo generator",
+        provider: aiProviderLabel(resolveAiProvider()),
         error: error instanceof Error ? error.message : String(error),
       });
     } catch {

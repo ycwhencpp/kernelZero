@@ -1,11 +1,11 @@
+import { aiProviderLabel, estimatedGenerationCostUsd, resolveAiProvider } from "./ai-config";
+import * as gemini from "./gemini";
+import { podcastSchema } from "./podcast-schema";
 import { simpleHash } from "./rss";
-import type {
-  Chapter,
-  Citation,
-  ContentItem,
-  Episode,
-  EvidenceClaim,
-} from "./types";
+import { chunkForSpeech } from "./speech-chunk";
+import type { Citation, ContentItem, Episode, EvidenceClaim } from "./types";
+
+export { chunkForSpeech };
 
 type RuntimeEnv = {
   OPENAI_API_KEY?: string;
@@ -19,7 +19,8 @@ export type PodcastPackage = {
   episode: Episode;
   evidence: EvidenceClaim[];
   audio: ArrayBuffer | null;
-  provider: "openai" | "demo";
+  audioContentType: string | null;
+  provider: "openai" | "gemini" | "demo";
 };
 
 function runtimeEnv(): RuntimeEnv {
@@ -40,46 +41,6 @@ function extractResponseText(payload: Record<string, unknown>): string {
   return fragments.join("\n");
 }
 
-function podcastSchema() {
-  return {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      title: { type: "string" },
-      dek: { type: "string" },
-      script: { type: "string" },
-      showNotes: { type: "string" },
-      chapters: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            title: { type: "string" },
-            startSeconds: { type: "integer" },
-          },
-          required: ["title", "startSeconds"],
-        },
-      },
-      claims: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            claim: { type: "string" },
-            support: { type: "string" },
-            confidence: { type: "number" },
-            location: { type: "string" },
-          },
-          required: ["claim", "support", "confidence", "location"],
-        },
-      },
-    },
-    required: ["title", "dek", "script", "showNotes", "chapters", "claims"],
-  };
-}
-
 async function createStructuredPodcast(
   items: ContentItem[],
   episodeType: Episode["type"],
@@ -88,7 +49,7 @@ async function createStructuredPodcast(
   dek: string;
   script: string;
   showNotes: string;
-  chapters: Chapter[];
+  chapters: Array<{ title: string; startSeconds: number }>;
   claims: Array<{
     claim: string;
     support: string;
@@ -253,36 +214,6 @@ async function synthesizeSpeech(script: string): Promise<ArrayBuffer> {
   return merged.buffer;
 }
 
-export function chunkForSpeech(value: string, maxCharacters = 3_600): string[] {
-  const paragraphs = value.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
-  const chunks: string[] = [];
-  let current = "";
-
-  for (const paragraph of paragraphs) {
-    if ((current + paragraph).length <= maxCharacters) {
-      current = current ? `${current}\n\n${paragraph}` : paragraph;
-      continue;
-    }
-    if (current) chunks.push(current);
-    if (paragraph.length <= maxCharacters) {
-      current = paragraph;
-      continue;
-    }
-
-    const sentences = paragraph.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [paragraph];
-    current = "";
-    for (const sentence of sentences) {
-      if ((current + sentence).length > maxCharacters && current) {
-        chunks.push(current.trim());
-        current = "";
-      }
-      current += sentence;
-    }
-  }
-  if (current) chunks.push(current.trim());
-  return chunks;
-}
-
 function demoPodcast(items: ContentItem[], type: Episode["type"]) {
   const primary = items[0];
   const sourceList = items
@@ -306,7 +237,7 @@ ${primary.summary} ${preprintDisclosure}
 
 Method and findings.
 
-The available source material emphasizes ${primary.topics.join(", ")}. This demo draft deliberately avoids adding numerical claims that are not present in the source packet. When an OpenAI API key is connected, SignalCast generates a longer evidence ledger and runs a separate factual verification pass before audio is created.
+The available source material emphasizes ${primary.topics.join(", ")}. This demo draft deliberately avoids adding numerical claims that are not present in the source packet. When an OpenAI or Gemini API key is connected, SignalCast generates a longer evidence ledger and runs a separate factual verification pass before audio is created.
 
 Limitations.
 
@@ -355,12 +286,16 @@ export async function generatePodcast(
   options: { includeAudio?: boolean } = {},
 ): Promise<PodcastPackage> {
   if (!items.length) throw new Error("At least one source is required.");
-  const env = runtimeEnv();
-  const generated = env.OPENAI_API_KEY
-    ? await createStructuredPodcast(items, type)
-    : demoPodcast(items, type);
+  const provider = resolveAiProvider();
+  const generated =
+    provider === "gemini"
+      ? await gemini.createStructuredPodcast(items, type)
+      : provider === "openai"
+        ? await createStructuredPodcast(items, type)
+        : demoPodcast(items, type);
 
-  if (env.OPENAI_API_KEY) await verifyScript(generated, items);
+  if (provider === "gemini") await gemini.verifyScript(generated, items);
+  if (provider === "openai") await verifyScript(generated, items);
 
   const now = new Date().toISOString();
   const episodeId = `episode-${simpleHash(`${generated.title}|${now}`)}`;
@@ -383,10 +318,15 @@ export async function generatePodcast(
     confidence: claim.confidence,
     location: claim.location,
   }));
-  const audio =
-    options.includeAudio && env.OPENAI_API_KEY
-      ? await synthesizeSpeech(generated.script)
-      : null;
+  let audio: ArrayBuffer | null = null;
+  let audioContentType: string | null = null;
+  if (options.includeAudio && provider === "openai") {
+    audio = await synthesizeSpeech(generated.script);
+    audioContentType = "audio/mpeg";
+  } else if (options.includeAudio && provider === "gemini") {
+    audio = await gemini.synthesizeSpeech(generated.script);
+    audioContentType = gemini.GEMINI_AUDIO_CONTENT_TYPE;
+  }
 
   return {
     episode: {
@@ -410,6 +350,9 @@ export async function generatePodcast(
     },
     evidence,
     audio,
-    provider: env.OPENAI_API_KEY ? "openai" : "demo",
+    audioContentType,
+    provider: provider ?? "demo",
   };
 }
+
+export { aiProviderLabel, estimatedGenerationCostUsd, resolveAiProvider };
