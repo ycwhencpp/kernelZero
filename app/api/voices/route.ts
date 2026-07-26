@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     const sampleKey = await saveVoiceSample(audioSample);
     try {
       await validateVoiceSampleDuration(sampleKey);
-      const replacedSampleKey = await saveVoiceProfile(
+      await saveVoiceProfile(
         ownerId,
         {
           id: `voice-profile-${crypto.randomUUID()}`,
@@ -42,7 +42,6 @@ export async function POST(request: Request) {
         },
         sampleKey,
       );
-      await deleteVoiceSample(replacedSampleKey);
     } catch (error) {
       await deleteVoiceSample(sampleKey);
       throw error;

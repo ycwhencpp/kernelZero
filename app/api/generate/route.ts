@@ -16,7 +16,8 @@ import {
   getDashboardState,
   recordJob,
 } from "../../../lib/store";
-import type { Episode } from "../../../lib/types";
+import { normalizeEpisodeLength } from "../../../lib/podcast-length";
+import type { Episode, EpisodeLength } from "../../../lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,7 @@ export async function POST(request: Request) {
       type?: Episode["type"];
       itemIds?: string[];
       includeAudio?: boolean;
+      episodeLength?: EpisodeLength;
     };
     const type = body.type ?? "paper_deep_dive";
     const state = await getDashboardState(ownerId);
@@ -85,6 +87,7 @@ export async function POST(request: Request) {
     const generated = await generatePodcast(items, type, {
       includeAudio: needsAudio,
       voiceProfile,
+      episodeLength: normalizeEpisodeLength(body.episodeLength ?? state.settings.episodeLength),
     });
     const episode = await createEpisode(
       ownerId,

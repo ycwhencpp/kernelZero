@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DashboardState, Episode } from "../lib/types";
+import type { DashboardState, Episode, EpisodeLength, WorkspaceSettings } from "../lib/types";
 import {
   OrganicAppShell,
   type OrganicView,
@@ -95,6 +95,7 @@ export function DashboardClient({
   const generateEpisode = async (
     type: Episode["type"],
     itemIds: string[] = [],
+    episodeLength?: EpisodeLength,
   ) => {
     setBusy(`generate:${itemIds[0] ?? type}`);
     try {
@@ -104,7 +105,7 @@ export function DashboardClient({
         state: DashboardState;
       }>("/api/generate", {
         method: "POST",
-        body: JSON.stringify({ type, itemIds, includeAudio: true }),
+        body: JSON.stringify({ type, itemIds, includeAudio: true, episodeLength }),
       });
       setState(payload.state);
       setView("review");
@@ -182,6 +183,19 @@ export function DashboardClient({
     notify("Transcript saved.");
   };
 
+  const regenerateEpisodeAudio = async (episodeId: string) => {
+    setBusy(`audio:${episodeId}`);
+    try {
+      const payload = await requestJson<{ state: DashboardState }>(`/api/episodes/${encodeURIComponent(episodeId)}/audio`, { method: "POST" });
+      setState(payload.state);
+      notify("Audio regenerated with the selected local narrator.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to regenerate audio.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const exportEpisode = (episode: Episode) => {
     const blob = new Blob([episode.script], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -242,6 +256,37 @@ export function DashboardClient({
       const message = error instanceof Error ? error.message : "Unable to remove the local voice.";
       notify(message);
       throw error;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveSettings = async (patch: Partial<WorkspaceSettings>) => {
+    setBusy("settings:save");
+    try {
+      const payload = await requestJson<{ state: DashboardState }>("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      setState(payload.state);
+      notify("Configuration saved.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to save configuration.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const selectVoice = async (voiceId: string) => {
+    setBusy("voice:select");
+    try {
+      const payload = await requestJson<{ state: DashboardState }>(`/api/voices/${encodeURIComponent(voiceId)}`, {
+        method: "PATCH",
+      });
+      setState(payload.state);
+      notify("Primary narrator updated.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to select the local narrator.");
     } finally {
       setBusy(null);
     }
@@ -309,7 +354,7 @@ export function DashboardClient({
             }}
           />
         )}
-        {view === "settings" && <OrganicSettingsView state={state} feedUrl={feedUrl} onDeleteWorkspace={() => void deleteWorkspace()} busy={busy === "workspace:delete"} onNotify={notify} onCreateVoice={createVoice} onDisconnectVoice={disconnectVoice} />}
+        {view === "settings" && <OrganicSettingsView state={state} feedUrl={feedUrl} onDeleteWorkspace={() => void deleteWorkspace()} busy={busy !== null} onNotify={notify} onCreateVoice={createVoice} onDisconnectVoice={disconnectVoice} onSaveSettings={saveSettings} onSelectVoice={selectVoice} />}
         {view === "review" && reviewEpisode && (
           <OrganicReviewView
             state={state}
@@ -321,6 +366,7 @@ export function DashboardClient({
             onPreview={() => previewEpisode(reviewEpisode)}
             onSeek={seekEpisode}
             onEdit={(script) => void editEpisode(reviewEpisode.id, script)}
+            onRegenerateAudio={() => void regenerateEpisodeAudio(reviewEpisode.id)}
             onExport={() => exportEpisode(reviewEpisode)}
             busy={busy}
           />
@@ -329,7 +375,7 @@ export function DashboardClient({
           <OrganicCreateView
             state={state}
             onBack={() => navigate("dashboard")}
-            onStart={(itemIds) => void generateEpisode("daily_digest", itemIds)}
+            onStart={(itemIds, episodeLength) => void generateEpisode("daily_digest", itemIds, episodeLength)}
             onAddSource={() => setModal("source")}
             busy={busy}
           />

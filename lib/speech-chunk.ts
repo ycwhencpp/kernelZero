@@ -1,29 +1,48 @@
 export function chunkForSpeech(value: string, maxCharacters = 3_600): string[] {
+  if (maxCharacters < 1) return [];
   const paragraphs = value.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
   const chunks: string[] = [];
   let current = "";
 
-  for (const paragraph of paragraphs) {
-    if ((current + paragraph).length <= maxCharacters) {
-      current = current ? `${current}\n\n${paragraph}` : paragraph;
-      continue;
+  const pushCurrent = () => {
+    if (current.trim()) chunks.push(current.trim());
+    current = "";
+  };
+
+  const append = (part: string) => {
+    const separator = current ? " " : "";
+    if ((current + separator + part).length <= maxCharacters) {
+      current += `${separator}${part}`;
+      return;
     }
-    if (current) chunks.push(current);
-    if (paragraph.length <= maxCharacters) {
-      current = paragraph;
-      continue;
+    pushCurrent();
+    if (part.length <= maxCharacters) {
+      current = part;
+      return;
     }
 
-    const sentences = paragraph.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [paragraph];
-    current = "";
-    for (const sentence of sentences) {
-      if ((current + sentence).length > maxCharacters && current) {
-        chunks.push(current.trim());
-        current = "";
+    for (const word of part.split(/\s+/).filter(Boolean)) {
+      if (word.length > maxCharacters) {
+        pushCurrent();
+        for (let offset = 0; offset < word.length; offset += maxCharacters) {
+          const slice = word.slice(offset, offset + maxCharacters);
+          if (slice.length === maxCharacters) chunks.push(slice);
+          else current = slice;
+        }
+        continue;
       }
-      current += sentence;
+      const wordSeparator = current ? " " : "";
+      if ((current + wordSeparator + word).length > maxCharacters) pushCurrent();
+      current += `${current ? " " : ""}${word}`;
+    }
+  };
+
+  for (const paragraph of paragraphs) {
+    const sentences = paragraph.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [paragraph];
+    for (const sentence of sentences) {
+      append(sentence.trim());
     }
   }
-  if (current) chunks.push(current.trim());
+  pushCurrent();
   return chunks;
 }

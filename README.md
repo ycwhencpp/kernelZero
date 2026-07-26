@@ -27,7 +27,7 @@ npm run dev
 ```
 
 Create a Supabase project, run every migration in `supabase/migrations/` in its SQL
-editor (currently `0001_initial.sql`, `0002_voice_profiles.sql`, and `0003_migrate_openai_voices_to_local_chatterbox.sql`), and add `NEXT_PUBLIC_SUPABASE_URL` plus the server-only
+editor (currently `0001_initial.sql` through `0004_workspace_settings_and_multiple_voices.sql`), and add `NEXT_PUBLIC_SUPABASE_URL` plus the server-only
 `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`. The migration creates the required
 `podcast-media` public Storage bucket.
 
@@ -42,7 +42,9 @@ python3.11 -m venv .venv-chatterbox
 .venv-chatterbox/bin/python -m pip install -r requirements/chatterbox.txt
 ```
 
-In **Settings → AI Voice & Persona**, upload one clear 6–30 second sample for a speaker you own or have explicit permission to use. SignalCast retains the raw reference clip only in `.signalcast/voices` on the local host; Supabase receives an opaque file key rather than the audio. The Chatterbox model weights download into the local Hugging Face cache on first narration (or `CHATTERBOX_CACHE_DIR` if set), then are reused locally. Remove the profile to delete its reference clip.
+In **Settings → AI Voice & Persona**, upload one clear 6–30 second sample for each speaker you own or have explicit permission to use. Select the active narrator from the Primary Narrator picker and use its preview button before generating an episode. SignalCast retains the raw reference clips only in `.signalcast/voices` on the local host; Supabase receives opaque file keys rather than audio. The Chatterbox model weights download into the local Hugging Face cache on first narration (or `CHATTERBOX_CACHE_DIR` if set), then are reused locally. Remove a profile to delete its reference clip.
+
+Episode length, daily generation, and publish time are persisted in Supabase. The chosen length is passed to both manual generation and the daily cron, so it controls the next script rather than only the settings UI.
 
 Production variables:
 

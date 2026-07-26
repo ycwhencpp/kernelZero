@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { chunkForSpeech } from "./speech-chunk";
 import { resolveVoiceSample } from "./local-voice";
+import { prepareForChatterbox } from "./narration-text";
 
 const execFileAsync = promisify(execFile);
 
@@ -37,7 +38,11 @@ export async function assertChatterboxAvailable(): Promise<void> {
 }
 
 /** Creates MP3 narration with Chatterbox Turbo and a locally stored reference sample. */
-export async function synthesizeChatterboxSpeech(script: string, sampleKey: string): Promise<ArrayBuffer> {
+export async function synthesizeChatterboxSpeech(
+  script: string,
+  sampleKey: string,
+  targetDurationSeconds?: number,
+): Promise<ArrayBuffer> {
   await assertChatterboxAvailable();
   const workDir = await mkdtemp(join(tmpdir(), "signalcast-chatterbox-"));
   const requestPath = join(workDir, "request.json");
@@ -45,11 +50,17 @@ export async function synthesizeChatterboxSpeech(script: string, sampleKey: stri
   const mp3Path = join(workDir, "speech.mp3");
   const workerPath = resolve("scripts/chatterbox_tts.py");
   const ffmpegCommand = process.env.LOCAL_FFMPEG_COMMAND || "ffmpeg";
+  const ffprobeCommand = process.env.LOCAL_FFPROBE_COMMAND || "ffprobe";
   const request: ChatterboxRequest = {
-    chunks: chunkForSpeech(script, 900),
+    // Chatterbox Turbo is tuned for short voice-agent turns. Sentence-sized
+    // chunks prevent long-form narration from drifting into silence or noise.
+    chunks: chunkForSpeech(prepareForChatterbox(script), 260),
     samplePath: resolveVoiceSample(sampleKey),
     device: chatterboxDevice(),
   };
+  if (request.chunks.length === 0) {
+    throw new Error("The narration script contains no speakable text.");
+  }
 
   try {
     await writeFile(requestPath, JSON.stringify(request), "utf8");
@@ -59,9 +70,22 @@ export async function synthesizeChatterboxSpeech(script: string, sampleKey: stri
       maxBuffer: 1024 * 1024,
       timeout: Number(process.env.CHATTERBOX_TIMEOUT_MS || 30 * 60_000),
     });
+    let tempoFilter: string[] = [];
+    if (targetDurationSeconds && targetDurationSeconds > 0) {
+      const { stdout } = await execFileAsync(
+        ffprobeCommand,
+        ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", wavPath],
+        { maxBuffer: 1024 * 1024 },
+      );
+      const generatedDurationSeconds = Number.parseFloat(stdout.trim());
+      const tempo = generatedDurationSeconds / targetDurationSeconds;
+      if (Number.isFinite(tempo) && tempo >= 0.5 && tempo <= 2 && Math.abs(tempo - 1) > 0.02) {
+        tempoFilter = ["-filter:a", `atempo=${tempo.toFixed(6)}`];
+      }
+    }
     await execFileAsync(
       ffmpegCommand,
-      ["-y", "-loglevel", "error", "-i", wavPath, "-codec:a", "libmp3lame", "-b:a", "128k", mp3Path],
+      ["-y", "-loglevel", "error", "-i", wavPath, ...tempoFilter, "-codec:a", "libmp3lame", "-b:a", "128k", mp3Path],
       { maxBuffer: 1024 * 1024 },
     );
     const audio = await readFile(mp3Path);

@@ -18,6 +18,7 @@ export function OrganicReviewView({
   onPreview,
   onSeek,
   onEdit,
+  onRegenerateAudio,
   onExport,
   busy,
 }: {
@@ -30,6 +31,7 @@ export function OrganicReviewView({
   onPreview: () => void;
   onSeek: (seconds: number) => void;
   onEdit: (script: string) => void;
+  onRegenerateAudio: () => void;
   onExport: () => void;
   busy: string | null;
 }) {
@@ -66,6 +68,9 @@ export function OrganicReviewView({
         <div className="organic-review-actions">
           <button type="button" className="organic-btn organic-btn-outline" onClick={onReject}>
             Reject / Redo
+          </button>
+          <button type="button" className="organic-btn organic-btn-outline" disabled={busy !== null} onClick={onRegenerateAudio}>
+            Regenerate Audio
           </button>
           <button
             type="button"

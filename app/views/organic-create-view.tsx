@@ -1,7 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { DashboardState } from "../../lib/types";
+import { episodeLengthProfile } from "../../lib/podcast-length";
+import type { DashboardState, EpisodeLength } from "../../lib/types";
 
 export function OrganicCreateView({
   state,
@@ -12,13 +13,13 @@ export function OrganicCreateView({
 }: {
   state: DashboardState;
   onBack: () => void;
-  onStart: (itemIds: string[]) => void;
+  onStart: (itemIds: string[], episodeLength: EpisodeLength) => void;
   onAddSource: () => void;
   busy: string | null;
 }) {
   const sources = state.sources;
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(sources.slice(0, 2).map((source) => source.id));
-  const [depth, setDepth] = useState("standard");
+  const [depth, setDepth] = useState<EpisodeLength>(state.settings.episodeLength);
   const [generationTime, setGenerationTime] = useState("08:00");
   const [weekdays, setWeekdays] = useState([true, true, true, true, true, false, false]);
   const [distribution, setDistribution] = useState({ spotify: true, apple: false });
@@ -74,11 +75,11 @@ export function OrganicCreateView({
           <h3>Episode Settings</h3>
           <p className="organic-field-label">Narrative Depth</p>
           <div className="organic-depth-list">
-            <button type="button" className={depth === "brief" ? "is-active" : ""} onClick={() => setDepth("brief")}>Brief</button>
+            <button type="button" className={depth === "brief" ? "is-active" : ""} onClick={() => setDepth("brief")}>Brief · 3 min</button>
             <button type="button" className={depth === "standard" ? "is-active" : ""} onClick={() => setDepth("standard")}>
-              Standard
+              Standard · 9 min
             </button>
-            <button type="button" className={depth === "deep" ? "is-active" : ""} onClick={() => setDepth("deep")}>Deep</button>
+            <button type="button" className={depth === "deep" ? "is-active" : ""} onClick={() => setDepth("deep")}>Deep · 15 min</button>
           </div>
             <label className="organic-field light">
               <span>AI Voice Talent</span>
@@ -135,22 +136,22 @@ export function OrganicCreateView({
             </li>
             <li>
               <span>Estimated Length</span>
-              <strong>10 Minutes</strong>
+              <strong>{episodeLengthProfile(depth).minutes} Minutes</strong>
             </li>
             <li>
               <span>AI Voice</span>
-              <strong>Elias</strong>
+              <strong>{state.voiceProfile?.name ?? "Local system voice"}</strong>
             </li>
           </ul>
           <button
             type="button"
             className="organic-btn organic-btn-dark block"
             disabled={busy !== null}
-            onClick={() => onStart(selectedItems.map((item) => item.id))}
+            onClick={() => onStart(selectedItems.map((item) => item.id), depth)}
           >
             {busy ? "Starting…" : selectedItems.length ? `START PIPELINE (${selectedItems.length} items)` : "START PIPELINE"}
           </button>
-          <button type="button" className="organic-btn organic-btn-outline block" onClick={() => onStart(selectedItems.slice(0, 1).map((item) => item.id))} disabled={busy !== null || selectedItems.length === 0}>
+          <button type="button" className="organic-btn organic-btn-outline block" onClick={() => onStart(selectedItems.slice(0, 1).map((item) => item.id), depth)} disabled={busy !== null || selectedItems.length === 0}>
             Generate Preview
           </button>
         </article>

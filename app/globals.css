@@ -1306,6 +1306,18 @@ img {
   max-width: min(100%, 310px);
 }
 
+.organic-wave-voice-preview {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.organic-wave-voice-preview audio {
+  width: min(100%, 240px);
+  height: 30px;
+}
+
 .organic-toggle-row {
   display: flex;
   align-items: center;

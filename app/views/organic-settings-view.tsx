@@ -147,7 +147,7 @@ function VoiceProfileSetup({
         </label>
         <label className="organic-field">
           <span>Reference voice sample (6–30 seconds)</span>
-          <small>Use a clear recording of the same speaker. MP3, WAV, OGG, AAC, FLAC, WebM, or MP4; 10 MB maximum.</small>
+          <small>Use a clean 10–20 second recording of one speaker, with no music or background voices. MP3, WAV, OGG, AAC, FLAC, WebM, or MP4; 10 MB maximum.</small>
           <input type="file" accept={ACCEPTED_AUDIO} onChange={(event) => setAudioSample(event.target.files?.[0] ?? null)} required />
         </label>
         <label className="organic-checkbox-row">
@@ -166,7 +166,7 @@ function VoiceProfileSetup({
           {previewUrl && <audio controls src={previewUrl} />}
         </div>
         <button type="submit" className="organic-btn organic-btn-dark" disabled={busy || !consentAcknowledged}>
-          {busy ? "Saving voice…" : voiceProfile ? "Replace local voice" : "Create local voice"}
+          {busy ? "Saving voice…" : "Add local voice"}
         </button>
       </form>
       <p className="organic-voice-note">Uses local Chatterbox TTS. Ollama can continue to write and fact-check the podcast; no OpenAI key is needed.</p>
@@ -174,11 +174,51 @@ function VoiceProfileSetup({
   );
 }
 
-export function OrganicSettingsView({ state, feedUrl, onDeleteWorkspace, busy, onNotify, onCreateVoice, onDisconnectVoice }: { state: DashboardState; feedUrl: string; onDeleteWorkspace: () => void; busy: boolean; onNotify: (message: string) => void; onCreateVoice: (form: FormData) => Promise<void>; onDisconnectVoice: () => Promise<void> }) {
-  const [dailyGeneration, setDailyGeneration] = useState(true);
-  const [length, setLength] = useState("standard");
-  const [publishTime, setPublishTime] = useState("08:00");
-  const narrator = state.voiceProfile ? `${state.voiceProfile.name} — local Chatterbox voice` : "Local system voice";
+function ActiveVoicePreview({ voiceProfile, onNotify }: { voiceProfile: VoiceProfile | null; onNotify: (message: string) => void }) {
+  const [previewing, setPreviewing] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
+
+  const preview = async () => {
+    if (!voiceProfile) {
+      onNotify("Choose a local narrator first.");
+      return;
+    }
+    setPreviewing(true);
+    try {
+      const response = await fetch("/api/voices/preview", { method: "POST", body: new FormData() });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error || "Unable to generate the voice preview.");
+      }
+      const nextPreviewUrl = URL.createObjectURL(await response.blob());
+      setPreviewUrl((previous) => {
+        if (previous) URL.revokeObjectURL(previous);
+        return nextPreviewUrl;
+      });
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Unable to generate the voice preview.");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  return (
+    <div className="organic-wave-voice-preview">
+      <button type="button" className="organic-btn organic-btn-outline compact" disabled={!voiceProfile || previewing} onClick={() => void preview()}>
+        {previewing ? "Generating…" : "Preview voice"}
+      </button>
+      {previewUrl && <audio controls src={previewUrl} />}
+    </div>
+  );
+}
+
+export function OrganicSettingsView({ state, feedUrl, onDeleteWorkspace, busy, onNotify, onCreateVoice, onDisconnectVoice, onSaveSettings, onSelectVoice }: { state: DashboardState; feedUrl: string; onDeleteWorkspace: () => void; busy: boolean; onNotify: (message: string) => void; onCreateVoice: (form: FormData) => Promise<void>; onDisconnectVoice: () => Promise<void>; onSaveSettings: (patch: Partial<DashboardState["settings"]>) => Promise<void>; onSelectVoice: (voiceId: string) => Promise<void> }) {
+  const [publishTime, setPublishTime] = useState(state.settings.publishTime);
+  const { dailyGeneration, episodeLength } = state.settings;
   return (
     <div className="organic-settings">
       <div className="organic-settings-top">
@@ -202,16 +242,18 @@ export function OrganicSettingsView({ state, feedUrl, onDeleteWorkspace, busy, o
               </h3>
               <label className="organic-field">
                 <span>Primary Narrator</span>
-                <input value={narrator} readOnly />
+                <select value={state.voiceProfile?.id ?? ""} disabled={busy || state.voiceProfiles.length === 0} onChange={(event) => void onSelectVoice(event.target.value)}>
+                  {state.voiceProfiles.length === 0 ? <option value="">No local narrator configured</option> : state.voiceProfiles.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}{voice.active ? " (active)" : ""}</option>)}
+                </select>
               </label>
               <div className="organic-segment">
                 <span>Episode Length Strategy</span>
                 <div className="organic-segment-row">
-                  <button type="button" className={length === "brief" ? "is-active" : ""} onClick={() => setLength("brief")}>Brief (5m)</button>
-                  <button type="button" className={length === "standard" ? "is-active" : ""} onClick={() => setLength("standard")}>
-                    Standard (12m)
+                  <button type="button" disabled={busy} className={episodeLength === "brief" ? "is-active" : ""} onClick={() => void onSaveSettings({ episodeLength: "brief" })}>Brief (3m)</button>
+                  <button type="button" disabled={busy} className={episodeLength === "standard" ? "is-active" : ""} onClick={() => void onSaveSettings({ episodeLength: "standard" })}>
+                    Standard (9m)
                   </button>
-                  <button type="button" className={length === "deep" ? "is-active" : ""} onClick={() => setLength("deep")}>Deep (25m)</button>
+                  <button type="button" disabled={busy} className={episodeLength === "deep" ? "is-active" : ""} onClick={() => void onSaveSettings({ episodeLength: "deep" })}>Deep (15m)</button>
                 </div>
               </div>
             </div>
@@ -222,6 +264,7 @@ export function OrganicSettingsView({ state, feedUrl, onDeleteWorkspace, busy, o
                   <i key={i} style={{ height: `${h}px` }} />
                 ))}
               </div>
+              <ActiveVoicePreview voiceProfile={state.voiceProfile} onNotify={onNotify} />
             </div>
           </div>
           <VoiceProfileSetup voiceProfile={state.voiceProfile} onCreateVoice={onCreateVoice} onDisconnectVoice={onDisconnectVoice} onNotify={onNotify} />
@@ -232,13 +275,13 @@ export function OrganicSettingsView({ state, feedUrl, onDeleteWorkspace, busy, o
           <h3>Briefing Schedule</h3>
           <div className="organic-toggle-row">
             <span>Daily Generation</span>
-            <button type="button" className={`organic-toggle ${dailyGeneration ? "is-on" : ""}`} aria-pressed={dailyGeneration} onClick={() => setDailyGeneration((value) => !value)}>
+            <button type="button" disabled={busy} className={`organic-toggle ${dailyGeneration ? "is-on" : ""}`} aria-pressed={dailyGeneration} onClick={() => void onSaveSettings({ dailyGeneration: !dailyGeneration })}>
               {dailyGeneration ? "ON" : "OFF"}
             </button>
           </div>
           <label className="organic-field">
             <span>Publish Time (EST)</span>
-            <input type="time" value={publishTime} onChange={(event) => setPublishTime(event.target.value)} />
+            <input type="time" value={publishTime} disabled={busy} onChange={(event) => setPublishTime(event.target.value)} onBlur={() => { if (publishTime !== state.settings.publishTime) void onSaveSettings({ publishTime }); }} />
           </label>
           <div className="organic-callout">
             <span>Next Expected Output</span>

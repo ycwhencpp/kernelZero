@@ -41,6 +41,9 @@ export async function GET(request: Request) {
   const dateKey = `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
   const jobId = `daily-${dateKey}`;
   const initialState = await getDashboardState(ownerId);
+  if (!initialState.settings.dailyGeneration) {
+    return Response.json({ status: "paused", message: "Daily generation is disabled in workspace settings." });
+  }
   if (
     initialState.jobs.some(
       (job) => job.id === jobId && job.status === "completed",
@@ -129,6 +132,7 @@ export async function GET(request: Request) {
     const generated = await generatePodcast(digestItems, "daily_digest", {
       includeAudio: true,
       voiceProfile,
+      episodeLength: initialState.settings.episodeLength,
     });
     const episode = await createEpisode(
       ownerId,
@@ -154,16 +158,15 @@ export async function GET(request: Request) {
       narration: voiceProfile ? "local_chatterbox" : "system_voice",
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[cron/daily] ${jobId} failed for ${ownerId}:`, error);
     await recordJob(ownerId, {
       id: jobId,
       stage: "Daily research and digest",
       status: "failed",
-      error: error instanceof Error ? error.message : String(error),
+      error: message,
     });
-    return Response.json(
-      { error: error instanceof Error ? error.message : "Daily job failed." },
-      { status: 500 },
-    );
+    return Response.json({ error: message }, { status: 500 });
   }
 }
 

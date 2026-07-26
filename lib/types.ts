@@ -8,6 +8,14 @@ export type EpisodeStatus =
   | "published"
   | "failed";
 
+export type EpisodeLength = "brief" | "standard" | "deep";
+
+export type WorkspaceSettings = {
+  dailyGeneration: boolean;
+  episodeLength: EpisodeLength;
+  publishTime: string;
+};
+
 export type InterestProfile = {
   id: string;
   name: string;
@@ -147,6 +155,8 @@ export type DashboardState = {
   episodes: Episode[];
   evidence: EvidenceClaim[];
   voiceProfile: VoiceProfile | null;
+  voiceProfiles: VoiceProfile[];
+  settings: WorkspaceSettings;
   radar: RadarTopic[];
   jobs: JobRun[];
   stats: {
