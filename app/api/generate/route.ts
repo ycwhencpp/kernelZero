@@ -12,6 +12,7 @@ import {
 import {
   createEpisode,
   findItems,
+  getActiveVoiceProfile,
   getDashboardState,
   recordJob,
 } from "../../../lib/store";
@@ -60,6 +61,21 @@ export async function POST(request: Request) {
       );
     }
 
+    const needsAudio = body.includeAudio ?? true;
+    const voiceProfile = needsAudio ? await getActiveVoiceProfile(ownerId) : null;
+    if (needsAudio && process.env.REQUIRE_LOCAL_VOICE === "true" && !voiceProfile) {
+      return Response.json(
+        { error: "No active local Chatterbox voice is configured. Save a voice in Settings before generating audio." },
+        { status: 400 },
+      );
+    }
+    if (voiceProfile && process.env.VERCEL) {
+      return Response.json(
+        { error: "This Chatterbox voice is stored locally. Generate the podcast from the local SignalCast server, not Vercel." },
+        { status: 400 },
+      );
+    }
+
     await recordJob(ownerId, {
       id: jobId,
       stage: type === "daily_digest" ? "Daily digest" : "Deep-dive podcast",
@@ -67,7 +83,8 @@ export async function POST(request: Request) {
       provider: aiProviderLabel(provider),
     });
     const generated = await generatePodcast(items, type, {
-      includeAudio: body.includeAudio ?? true,
+      includeAudio: needsAudio,
+      voiceProfile,
     });
     const episode = await createEpisode(
       ownerId,
@@ -81,8 +98,8 @@ export async function POST(request: Request) {
       id: jobId,
       stage: type === "daily_digest" ? "Daily digest" : "Deep-dive podcast",
       status: "completed",
-      provider: aiProviderLabel(generated.provider === "demo" ? null : generated.provider),
-      costUsd: generated.provider === "demo" ? 0 : estimatedCostUsd,
+      provider: aiProviderLabel(generated.provider),
+      costUsd: estimatedCostUsd,
     });
 
     return Response.json({

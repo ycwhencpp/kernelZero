@@ -12,7 +12,8 @@ SignalCast is a personal research-intelligence and podcast studio. It discovers 
 - DOI/arXiv/URL/title deduplication and relevance/freshness/authority ranking.
 - Daily digest and paper/blog deep-dive generation.
 - Structured claim ledger plus a separate evidence-verification pass.
-- OpenAI Responses API and `tts-1-hd` adapters with a complete no-key demo fallback.
+- OpenAI Responses API, Gemini, and a local Ollama/macOS speech path.
+- Consent-backed local Chatterbox narrator voices: Ollama can write the script while Chatterbox narrates with the selected local reference voice.
 - Review-before-publish approval.
 - Public `/feed.xml`, transcript routes, immutable episode GUIDs, and podcast artwork.
 - Signed daily scheduler endpoint with idempotent job history.
@@ -25,16 +26,30 @@ npm install
 npm run dev
 ```
 
-Create a Supabase project, run `supabase/migrations/0001_initial.sql` in its SQL
-editor, and add `NEXT_PUBLIC_SUPABASE_URL` plus the server-only
+Create a Supabase project, run every migration in `supabase/migrations/` in its SQL
+editor (currently `0001_initial.sql`, `0002_voice_profiles.sql`, and `0003_migrate_openai_voices_to_local_chatterbox.sql`), and add `NEXT_PUBLIC_SUPABASE_URL` plus the server-only
 `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`. The migration creates the required
 `podcast-media` public Storage bucket.
 
-The complete demo works without external credentials. Add `GEMINI_API_KEY` or `OPENAI_API_KEY` to generate full scripts and MP3/WAV audio. With `AI_PROVIDER=auto` (default), Gemini is used when `GEMINI_API_KEY` is set. Provider calls are server-only.
+Install Ollama plus FFmpeg, pull a model such as `qwen2.5:14b`, and set `AI_PROVIDER=ollama` (or leave `AI_PROVIDER=auto`; it falls back to Ollama when cloud keys are absent). SignalCast uses the local model for structured writing and verification, then macOS speech synthesis for MP3 audio when no custom local voice is configured. Provider calls are server-only; no static demo records are inserted into the database.
+
+## Local Chatterbox narrator voice
+
+Chatterbox gives the app a fully local custom narrator voice; it does not need an OpenAI key. Install it once with Python 3.11:
+
+```bash
+python3.11 -m venv .venv-chatterbox
+.venv-chatterbox/bin/python -m pip install -r requirements/chatterbox.txt
+```
+
+In **Settings → AI Voice & Persona**, upload one clear 6–30 second sample for a speaker you own or have explicit permission to use. SignalCast retains the raw reference clip only in `.signalcast/voices` on the local host; Supabase receives an opaque file key rather than the audio. The Chatterbox model weights download into the local Hugging Face cache on first narration (or `CHATTERBOX_CACHE_DIR` if set), then are reused locally. Remove the profile to delete its reference clip.
 
 Production variables:
 
-- `GEMINI_API_KEY` or `OPENAI_API_KEY` (one is enough; optional `AI_PROVIDER=gemini|openai|auto`)
+- `GEMINI_API_KEY` or `OPENAI_API_KEY` (one is enough; optional `AI_PROVIDER=gemini|openai|ollama|auto`)
+- `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_CONTEXT_SIZE`, `LOCAL_TTS_VOICE`, `LOCAL_TTS_RATE` (optional local Ollama/macOS speech settings)
+- `CHATTERBOX_PYTHON`, `CHATTERBOX_DEVICE`, `CHATTERBOX_CACHE_DIR`, `LOCAL_VOICE_STORAGE_DIR` (optional local Chatterbox settings)
+- `REQUIRE_LOCAL_VOICE=true` to prevent a cron or manual generation from silently falling back to the system voice when no local narrator is configured
 - `GEMINI_TEXT_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_TTS_VOICE` (optional Gemini overrides)
 - `OPENAI_API_KEY` and OpenAI model overrides (if using OpenAI)
 - `PODCAST_BASE_URL`
@@ -58,7 +73,7 @@ The endpoint:
 2. Normalizes, scores, and deduplicates results.
 3. Selects a source-diverse digest.
 4. Generates and verifies the script.
-5. Generates and stores audio when an OpenAI key and Supabase Storage are available.
+5. Generates and stores audio using the selected local Chatterbox voice (or the configured default TTS) when Supabase Storage is available.
 6. Creates an episode in `needs_approval`.
 7. Treats the date-based job key as idempotent.
 

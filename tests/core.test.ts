@@ -9,7 +9,12 @@ import {
   scoreCandidate,
   selectDigestItems,
 } from "../lib/domain.ts";
-import { chunkForSpeech } from "../lib/openai.ts";
+import {
+  aiProviderLabel,
+  estimatedGenerationCostUsd,
+  resolveAiProvider,
+} from "../lib/ai-config.ts";
+import { chunkForSpeech, generatePodcast } from "../lib/openai.ts";
 import { parseFeed } from "../lib/rss.ts";
 import type { ContentItem, InterestProfile, NormalizedCandidate } from "../lib/types.ts";
 
@@ -148,6 +153,19 @@ test("daily budget gate permits free work and rejects overspend", () => {
   assert.equal(hasBudgetForGeneration(2, 2, 0), true);
 });
 
+test("local Ollama provider is key-free and has no API spend", () => {
+  const originalProvider = process.env.AI_PROVIDER;
+  process.env.AI_PROVIDER = "ollama";
+  try {
+    assert.equal(resolveAiProvider(), "ollama");
+    assert.equal(aiProviderLabel("ollama"), "Local Ollama");
+    assert.equal(estimatedGenerationCostUsd("ollama", true), 0);
+  } finally {
+    if (originalProvider === undefined) delete process.env.AI_PROVIDER;
+    else process.env.AI_PROVIDER = originalProvider;
+  }
+});
+
 test("tech radar requires corroboration and rewards cross-source momentum", () => {
   const radar = buildTechRadar(
     [
@@ -177,4 +195,66 @@ test("tech radar requires corroboration and rewards cross-source momentum", () =
   assert.equal(radar[0].name, "Agent observability");
   assert.equal(radar[0].itemCount, 2);
   assert.ok(radar[0].confidence >= 75);
+});
+
+test("evidence verification allows generic context and retries a failed repair", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalProvider = process.env.AI_PROVIDER;
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  const requests: RequestInit[] = [];
+  const draft = (title: string) => ({
+    title,
+    dek: "A grounded briefing.",
+    script:
+      "LLMs are broadly capable, while large models require substantial compute and inference has cost and latency trade-offs.",
+    showNotes: "Source: https://example.com/paper",
+    chapters: [{ title: "Background", startSeconds: 0 }],
+    claims: [
+      {
+        claim: "A quantization method supports faster inference.",
+        support: "A quantization method for faster inference.",
+        confidence: 0.9,
+        location: "Abstract",
+      },
+    ],
+  });
+  const responseTexts = [
+    JSON.stringify(draft("Initial draft")),
+    "FAIL\n- Invented paper-specific result.",
+    JSON.stringify(draft("First repair")),
+    "FAIL\n- A second invented paper-specific result.",
+    JSON.stringify(draft("Second repair")),
+    "PASS",
+  ];
+
+  process.env.AI_PROVIDER = "openai";
+  process.env.OPENAI_API_KEY = "test-key";
+  globalThis.fetch = (async (_input, init) => {
+    requests.push(init ?? {});
+    const outputText = responseTexts.shift();
+    assert.notEqual(outputText, undefined);
+    return new Response(JSON.stringify({ output_text: outputText }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const generated = await generatePodcast([item()], "daily_digest");
+    assert.equal(generated.episode.title, "Second repair");
+    assert.equal(requests.length, 6);
+
+    const verifierBody = JSON.parse(String(requests[1].body)) as {
+      input: Array<{ content: Array<{ text: string }> }>;
+    };
+    const verifierPrompt = verifierBody.input[0].content[0].text;
+    assert.match(verifierPrompt, /generic qualitative background/);
+    assert.match(verifierPrompt, /LLMs are broadly capable/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalProvider === undefined) delete process.env.AI_PROVIDER;
+    else process.env.AI_PROVIDER = originalProvider;
+    if (originalOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalOpenAiKey;
+  }
 });

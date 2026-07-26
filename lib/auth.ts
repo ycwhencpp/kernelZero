@@ -1,5 +1,4 @@
 import { headers } from "next/headers";
-import { DEMO_OWNER_ID } from "./demo-data";
 
 export async function currentOwner(): Promise<string> {
   const requestHeaders = await headers();
@@ -9,7 +8,11 @@ export async function currentOwner(): Promise<string> {
   if (process.env.REQUIRE_AUTH === "true") {
     throw new Error("AUTH_REQUIRED");
   }
-  return requestHeaders.get("x-signalcast-user")?.toLowerCase() || DEMO_OWNER_ID;
+  return (
+    requestHeaders.get("x-signalcast-user")?.toLowerCase() ||
+    process.env.CRON_OWNER_EMAIL?.toLowerCase() ||
+    "local@signalcast.local"
+  );
 }
 
 export function authErrorResponse(error: unknown): Response | null {

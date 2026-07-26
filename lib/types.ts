@@ -130,6 +130,15 @@ export type JobRun = {
   completedAt: string | null;
 };
 
+/** A local Chatterbox reference voice that the workspace has permission to use for narration. */
+export type VoiceProfile = {
+  id: string;
+  name: string;
+  provider: "chatterbox";
+  active: boolean;
+  createdAt: string;
+};
+
 export type DashboardState = {
   interests: InterestProfile[];
   sources: Source[];
@@ -137,6 +146,7 @@ export type DashboardState = {
   collections: Collection[];
   episodes: Episode[];
   evidence: EvidenceClaim[];
+  voiceProfile: VoiceProfile | null;
   radar: RadarTopic[];
   jobs: JobRun[];
   stats: {

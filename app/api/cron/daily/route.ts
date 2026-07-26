@@ -1,16 +1,16 @@
-import { DEMO_OWNER_ID } from "../../../../lib/demo-data";
 import {
   deduplicateItems,
   hasBudgetForGeneration,
   scoreCandidate,
   selectDigestItems,
 } from "../../../../lib/domain";
-import { generatePodcast, resolveAiProvider, estimatedGenerationCostUsd } from "../../../../lib/openai";
+import { aiProviderLabel, generatePodcast, resolveAiProvider, estimatedGenerationCostUsd } from "../../../../lib/openai";
 import { discoverResearch } from "../../../../lib/research";
 import { fetchFeed } from "../../../../lib/rss";
 import {
   addSource,
   createEpisode,
+  getActiveVoiceProfile,
   getDashboardState,
   personalizeItems,
   recordJob,
@@ -26,7 +26,7 @@ export async function GET(request: Request) {
     return Response.json({ error: "Invalid scheduler credential." }, { status: 401 });
   }
 
-  const ownerId = process.env.CRON_OWNER_EMAIL?.toLowerCase() || DEMO_OWNER_ID;
+  const ownerId = process.env.CRON_OWNER_EMAIL?.toLowerCase() || "local@signalcast.local";
   const dateParts = new Intl.DateTimeFormat("en", {
     timeZone: "Asia/Kolkata",
     year: "numeric",
@@ -77,6 +77,13 @@ export async function GET(request: Request) {
   });
 
   try {
+    const voiceProfile = await getActiveVoiceProfile(ownerId);
+    if (process.env.REQUIRE_LOCAL_VOICE === "true" && !voiceProfile) {
+      throw new Error("No active local Chatterbox voice is configured for this cron owner. Save a voice in Settings before running the daily cron.");
+    }
+    if (voiceProfile && process.env.VERCEL) {
+      throw new Error("The selected Chatterbox voice is stored on this local SignalCast machine. Run the daily cron locally; a Vercel function cannot read the local reference recording or run Chatterbox.");
+    }
     const discovered: typeof initialState.items = [];
     const warnings: string[] = [];
     for (const interest of initialState.interests.filter((entry) => entry.enabled)) {
@@ -121,6 +128,7 @@ export async function GET(request: Request) {
     const digestItems = selectDigestItems(unique, 5);
     const generated = await generatePodcast(digestItems, "daily_digest", {
       includeAudio: true,
+      voiceProfile,
     });
     const episode = await createEpisode(
       ownerId,
@@ -134,8 +142,8 @@ export async function GET(request: Request) {
       id: jobId,
       stage: "Daily research and digest",
       status: "completed",
-      provider: generated.provider === "openai" ? "OpenAI" : generated.provider === "gemini" ? "Gemini" : "Demo generator",
-      costUsd: generated.provider === "demo" ? 0 : estimatedCostUsd,
+      provider: aiProviderLabel(generated.provider),
+      costUsd: estimatedCostUsd,
     });
 
     return Response.json({
@@ -143,6 +151,7 @@ export async function GET(request: Request) {
       discovered: discovered.length,
       warnings,
       episode,
+      narration: voiceProfile ? "local_chatterbox" : "system_voice",
     });
   } catch (error) {
     await recordJob(ownerId, {
