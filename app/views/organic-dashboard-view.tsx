@@ -22,8 +22,12 @@ function statusForEpisode(episode: Episode): {
 function runMeta(episode: Episode): string {
   if (episode.status === "generating") return "Processing now";
   const created = new Date(episode.createdAt);
-  const hours = Math.max(1, Math.round((Date.now() - created.getTime()) / 3_600_000));
-  return hours < 24 ? `Created ${hours}h ago` : `Created ${created.toLocaleDateString()}`;
+  return `Created ${created.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  })}`;
 }
 
 export function OrganicDashboardView({
@@ -36,22 +40,29 @@ export function OrganicDashboardView({
 }: {
   state: DashboardState;
   digest: Episode | undefined;
-  onReview: () => void;
+  onReview: (episode: Episode) => void;
   onViewTranscription: () => void;
   onViewHistory: () => void;
   onPreview: () => void;
 }) {
   const recent = state.episodes.slice(0, 3);
+  const digestStatus = digest ? statusForEpisode(digest) : null;
   const digestDate = digest
-    ? new Date(digest.createdAt).toLocaleDateString("en", {
+    ? new Date(digest.createdAt).toLocaleDateString("en-US", {
         month: "long",
         day: "numeric",
         year: "numeric",
+        timeZone: "UTC",
       }).toUpperCase()
     : "NO BRIEFING YET";
   const evidence = digest ? state.evidence.filter((claim) => claim.episodeId === digest.id) : [];
-  const sourceAccuracy = evidence.length
-    ? `${Math.round((evidence.reduce((sum, claim) => sum + claim.confidence, 0) / evidence.length) * 100)}%`
+  const validConfidence = evidence
+    .map((claim) => Number(claim.confidence))
+    .filter((confidence) =>
+      Number.isFinite(confidence) && confidence >= 0 && confidence <= 1
+    );
+  const evidenceConfidence = validConfidence.length
+    ? `${Math.round((validConfidence.reduce((sum, confidence) => sum + confidence, 0) / validConfidence.length) * 100)}%`
     : "—";
   const month = new Date().toISOString().slice(0, 7);
   const monthlyEpisodes = state.episodes.filter((episode) => episode.createdAt.startsWith(month));
@@ -69,7 +80,7 @@ export function OrganicDashboardView({
             <div className="organic-hero-meta">
               <span className="organic-pill organic-pill-lime">
                 <i className="organic-dot" />
-                NEEDS REVIEW
+                {digestStatus?.label ?? "NO EPISODE"}
               </span>
               <span className="organic-eyebrow">{digestDate}</span>
             </div>
@@ -81,8 +92,13 @@ export function OrganicDashboardView({
             </p>
           </div>
           <div className="organic-hero-actions">
-            <button type="button" className="organic-btn organic-btn-dark" onClick={onReview}>
-              Review Today&apos;s Episode
+            <button
+              type="button"
+              className="organic-btn organic-btn-dark"
+              disabled={!digest}
+              onClick={() => digest && onReview(digest)}
+            >
+              Open Latest Episode
               <img src="/figma/icon-arrow.svg" alt="" width={10} height={10} />
             </button>
             <button
@@ -104,12 +120,12 @@ export function OrganicDashboardView({
                 <dd>{digest ? formatDuration(digest.durationSeconds) : "14:22"}</dd>
               </div>
               <div>
-                <dt>Source Accuracy</dt>
-                <dd>{sourceAccuracy}</dd>
+                <dt>Evidence Confidence</dt>
+                <dd>{evidenceConfidence}</dd>
               </div>
               <div>
-                <dt>Target Audience</dt>
-                <dd>{state.sources.length} source{state.sources.length === 1 ? "" : "s"}</dd>
+                <dt>Sources Cited</dt>
+                <dd>{digest?.citations.length ?? 0}</dd>
               </div>
             </dl>
           </div>
@@ -137,7 +153,13 @@ export function OrganicDashboardView({
             {recent.map((episode) => {
               const status = statusForEpisode(episode);
               return (
-                <li key={episode.id} className="organic-run-row">
+                <li key={episode.id}>
+                  <button
+                    type="button"
+                    className="organic-run-row"
+                    onClick={() => onReview(episode)}
+                    aria-label={`Review ${episode.title}`}
+                  >
                   <div className="organic-run-main">
                     <span className={`organic-run-icon tone-${status.tone}`}>
                       <img
@@ -164,6 +186,7 @@ export function OrganicDashboardView({
                     </span>
                     <img src="/figma/icon-kebab.svg" alt="" width={4} height={16} />
                   </div>
+                  </button>
                 </li>
               );
             })}
@@ -191,7 +214,7 @@ export function OrganicDashboardView({
             <strong>{state.sources.length.toLocaleString()}</strong>
           </div>
           <div className="organic-stat-light">
-            <p className="organic-eyebrow">SAVED HOURS</p>
+            <p className="organic-eyebrow">PUBLISHED MINUTES</p>
             <strong>{state.stats.listeningMinutes}m</strong>
           </div>
         </div>

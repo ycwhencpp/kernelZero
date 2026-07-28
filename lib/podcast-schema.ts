@@ -17,6 +17,14 @@ export type PodcastSection = {
   claims: PodcastDraft["claims"];
 };
 
+export function normalizeEvidenceConfidence(value: unknown): number {
+  const confidence = Number(value);
+  if (!Number.isFinite(confidence) || confidence < 0) return 0;
+  if (confidence <= 1) return confidence;
+  if (confidence <= 100) return confidence / 100;
+  return 0;
+}
+
 export function podcastSchema() {
   return {
     type: "object",

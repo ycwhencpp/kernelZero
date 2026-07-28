@@ -33,6 +33,23 @@ editor (currently `0001_initial.sql` through `0004_workspace_settings_and_multip
 
 Install Ollama plus FFmpeg, pull a model such as `qwen2.5:14b`, and set `AI_PROVIDER=ollama` (or leave `AI_PROVIDER=auto`; it falls back to Ollama when cloud keys are absent). SignalCast uses the local model for structured writing and verification, then macOS speech synthesis for MP3 audio when no custom local voice is configured. Provider calls are server-only; no static demo records are inserted into the database.
 
+SignalCast uses a staged parallel Ollama pipeline: one fact-ownership plan, bounded
+parallel section writers, parallel evidence and narrative critics, and targeted
+section repairs. `OLLAMA_PARALLELISM` controls the application worker count.
+The Ollama server must separately allow the same concurrency or requests will
+queue. For a host with enough RAM or VRAM, start with:
+
+```bash
+OLLAMA_NUM_PARALLEL=3 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KEEP_ALIVE=30m ollama serve
+```
+
+Start with two workers on memory-constrained hosts. Parallel context allocation
+increases memory usage, so verify model placement and allocated context with
+`ollama ps` before raising the worker count. Set `OLLAMA_LOG_TIMINGS=true` to log
+per-stage load, prompt-evaluation, and output-generation timings.
+`OLLAMA_FIRST_TOKEN_TIMEOUT_MS` bounds server queueing, while
+`OLLAMA_IDLE_TIMEOUT_MS` aborts only when an active response stops streaming.
+
 ## Local Chatterbox narrator voice
 
 Chatterbox gives the app a fully local custom narrator voice; it does not need an OpenAI key. Install it once with Python 3.11:
@@ -49,8 +66,8 @@ Episode length, daily generation, and publish time are persisted in Supabase. Th
 Production variables:
 
 - `GEMINI_API_KEY` or `OPENAI_API_KEY` (one is enough; optional `AI_PROVIDER=gemini|openai|ollama|auto`)
-- `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_CONTEXT_SIZE`, `LOCAL_TTS_VOICE`, `LOCAL_TTS_RATE` (optional local Ollama/macOS speech settings)
-- `CHATTERBOX_PYTHON`, `CHATTERBOX_DEVICE`, `CHATTERBOX_CACHE_DIR`, `LOCAL_VOICE_STORAGE_DIR` (optional local Chatterbox settings)
+- `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_CONTEXT_SIZE`, `OLLAMA_PARALLELISM`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_LOG_TIMINGS`, `OLLAMA_FIRST_TOKEN_TIMEOUT_MS`, `OLLAMA_IDLE_TIMEOUT_MS`, `LOCAL_TTS_VOICE`, `LOCAL_TTS_RATE` (optional local Ollama/macOS speech settings)
+- `CHATTERBOX_PYTHON`, `CHATTERBOX_DEVICE`, `CHATTERBOX_CACHE_DIR`, `CHATTERBOX_MAX_TEMPO_ADJUSTMENT`, `LOCAL_VOICE_STORAGE_DIR` (optional local Chatterbox settings)
 - `REQUIRE_LOCAL_VOICE=true` to prevent a cron or manual generation from silently falling back to the system voice when no local narrator is configured
 - `GEMINI_TEXT_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_TTS_VOICE` (optional Gemini overrides)
 - `OPENAI_API_KEY` and OpenAI model overrides (if using OpenAI)
