@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local Chatterbox Turbo worker. Its input and output file paths are supplied by SignalCast."""
+"""Local Chatterbox Turbo worker. Its input and output file paths are supplied by KernelZero."""
 
 import json
 import math

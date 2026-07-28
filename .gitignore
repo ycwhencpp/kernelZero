@@ -43,5 +43,5 @@ next-env.d.ts
 /outputs/
 /work/
 /.venv-chatterbox/
-/.signalcast/
+/.kernelzero/
 /supabase/.temp/

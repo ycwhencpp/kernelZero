@@ -134,7 +134,7 @@ export async function POST(request: Request) {
     }
     if (voiceProfile && process.env.VERCEL) {
       return Response.json(
-        { error: "This Chatterbox voice is stored locally. Generate the podcast from the local SignalCast server, not Vercel." },
+        { error: "This Chatterbox voice is stored locally. Generate the podcast from the local KernelZero server, not Vercel." },
         { status: 400 },
       );
     }

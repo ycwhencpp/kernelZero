@@ -60,7 +60,7 @@ export function OrganicAppShell({
     <div className="organic-app">
       <aside className="organic-sidebar">
         <div className="organic-brand-block">
-          <h1 className="organic-brand-title">SignalCast</h1>
+          <h1 className="organic-brand-title">KernelZero</h1>
           <p className="organic-brand-sub">AI Production Tool</p>
         </div>
 
@@ -102,7 +102,7 @@ export function OrganicAppShell({
 
         {!immersive && (
           <footer className="organic-footer">
-            <span>© {footerYear} SignalCast AI Production</span>
+            <span>© {footerYear} KernelZero AI Production</span>
             <div className="organic-footer-links">
               <button type="button" onClick={() => onFooterAction?.("Privacy Policy")}>Privacy Policy</button>
               <button type="button" onClick={() => onFooterAction?.("Terms of Service")}>Terms of Service</button>

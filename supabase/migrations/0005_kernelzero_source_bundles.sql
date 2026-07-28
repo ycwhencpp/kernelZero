@@ -1,6 +1,6 @@
--- SignalCast source bundles from SignalCast_Source_Bundles.md
+-- KernelZero source bundles from KernelZero_Source_Bundles.md
 -- Set preferred_owner to your profiles.id (same as login email / CRON_OWNER_EMAIL), or leave as-is to use the oldest profile.
--- 132 feeds from SignalCast_Source_Bundles.md (includes your bundle picks). IDs match in-app source-${hash(url)}.
+-- 132 feeds from KernelZero_Source_Bundles.md (includes your bundle picks). IDs match in-app source-${hash(url)}.
 
 insert into sources (id, owner_id, name, type, url, trust_level, rights_mode, enabled)
 select

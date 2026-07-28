@@ -1,6 +1,6 @@
-# SignalCast
+# KernelZero
 
-SignalCast is a personal research-intelligence and podcast studio. It discovers papers from OpenAlex, Semantic Scholar, and arXiv; reads approved RSS/Atom feeds; builds a searchable library; produces evidence-grounded podcast drafts; and exposes approved audio through a podcast RSS feed.
+KernelZero is a personal research-intelligence and podcast studio. It discovers papers from OpenAlex, Semantic Scholar, and arXiv; reads approved RSS/Atom feeds; builds a searchable library; produces evidence-grounded podcast drafts; and exposes approved audio through a podcast RSS feed.
 
 ## What works
 
@@ -31,9 +31,9 @@ editor (currently `0001_initial.sql` through `0004_workspace_settings_and_multip
 `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`. The migration creates the required
 `podcast-media` public Storage bucket.
 
-Install Ollama plus FFmpeg, pull a model such as `qwen2.5:14b`, and set `AI_PROVIDER=ollama` (or leave `AI_PROVIDER=auto`; it falls back to Ollama when cloud keys are absent). SignalCast uses the local model for structured writing and verification, then macOS speech synthesis for MP3 audio when no custom local voice is configured. Provider calls are server-only; no static demo records are inserted into the database.
+Install Ollama plus FFmpeg, pull a model such as `qwen2.5:14b`, and set `AI_PROVIDER=ollama` (or leave `AI_PROVIDER=auto`; it falls back to Ollama when cloud keys are absent). KernelZero uses the local model for structured writing and verification, then macOS speech synthesis for MP3 audio when no custom local voice is configured. Provider calls are server-only; no static demo records are inserted into the database.
 
-SignalCast uses a staged parallel Ollama pipeline: one fact-ownership plan, bounded
+KernelZero uses a staged parallel Ollama pipeline: one fact-ownership plan, bounded
 parallel section writers, parallel evidence and narrative critics, and targeted
 section repairs. `OLLAMA_PARALLELISM` controls the application worker count.
 The Ollama server must separately allow the same concurrency or requests will
@@ -59,7 +59,7 @@ python3.11 -m venv .venv-chatterbox
 .venv-chatterbox/bin/python -m pip install -r requirements/chatterbox.txt
 ```
 
-In **Settings → AI Voice & Persona**, upload one clear 6–30 second sample for each speaker you own or have explicit permission to use. Select the active narrator from the Primary Narrator picker and use its preview button before generating an episode. SignalCast retains the raw reference clips only in `.signalcast/voices` on the local host; Supabase receives opaque file keys rather than audio. The Chatterbox model weights download into the local Hugging Face cache on first narration (or `CHATTERBOX_CACHE_DIR` if set), then are reused locally. Remove a profile to delete its reference clip.
+In **Settings → AI Voice & Persona**, upload one clear 6–30 second sample for each speaker you own or have explicit permission to use. Select the active narrator from the Primary Narrator picker and use its preview button before generating an episode. KernelZero retains the raw reference clips only in `.kernelzero/voices` on the local host; Supabase receives opaque file keys rather than audio. The Chatterbox model weights download into the local Hugging Face cache on first narration (or `CHATTERBOX_CACHE_DIR` if set), then are reused locally. Remove a profile to delete its reference clip.
 
 Episode length, daily generation, and publish time are persisted in Supabase. The chosen length is passed to both manual generation and the daily cron, so it controls the next script rather than only the settings UI.
 

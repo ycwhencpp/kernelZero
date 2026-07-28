@@ -52,7 +52,7 @@ export async function synthesizeChatterboxSpeechWithMetadata(
   targetDurationSeconds?: number,
 ): Promise<GeneratedChatterboxSpeech> {
   await assertChatterboxAvailable();
-  const workDir = await mkdtemp(join(tmpdir(), "signalcast-chatterbox-"));
+  const workDir = await mkdtemp(join(tmpdir(), "kernelzero-chatterbox-"));
   const requestPath = join(workDir, "request.json");
   const wavPath = join(workDir, "speech.wav");
   const mp3Path = join(workDir, "speech.mp3");

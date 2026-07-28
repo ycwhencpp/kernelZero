@@ -61,7 +61,7 @@ export function OrganicSourcesView({
               </button>
             </div>
             <p className="organic-panel-copy">
-              Define keywords and entities that SignalCast prioritizes across all monitors.
+              Define keywords and entities that KernelZero prioritizes across all monitors.
             </p>
             <div className="organic-tag-list">
               {keywords.map(({ keyword, interestId }) => (
