@@ -9,9 +9,12 @@ export function resolveAiProvider(): AiProvider | null {
     return process.env.GEMINI_API_KEY ? "gemini" : null;
   }
   if (mode === "ollama") return "ollama";
-  if (process.env.GEMINI_API_KEY) return "gemini";
-  if (process.env.OPENAI_API_KEY) return "openai";
-  return "ollama";
+  if (mode === "auto") {
+    if (process.env.GEMINI_API_KEY) return "gemini";
+    if (process.env.OPENAI_API_KEY) return "openai";
+    return "ollama";
+  }
+  return null;
 }
 
 export function aiProviderLabel(provider: AiProvider | null): string {

@@ -1,3 +1,5 @@
+import { splitNarrationSentences } from "./sentence-segmentation";
+
 export function chunkForSpeech(value: string, maxCharacters = 3_600): string[] {
   if (maxCharacters < 1) return [];
   const paragraphs = value.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
@@ -38,7 +40,7 @@ export function chunkForSpeech(value: string, maxCharacters = 3_600): string[] {
   };
 
   for (const paragraph of paragraphs) {
-    const sentences = paragraph.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [paragraph];
+    const sentences = splitNarrationSentences(paragraph);
     for (const sentence of sentences) {
       append(sentence.trim());
     }

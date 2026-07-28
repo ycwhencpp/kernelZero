@@ -87,7 +87,7 @@ export function OrganicPublishedView({ episodes, onNewBriefing, onReview, onPrev
               <span className="organic-episode-thumb">SC</span>
               <div>
                 <p className="organic-eyebrow">
-                  {new Date(episode.publishedAt ?? episode.createdAt).toLocaleDateString("en", { month: "long", day: "numeric", year: "numeric" }).toUpperCase()} • {episode.type.replaceAll("_", " ").toUpperCase()}
+                  {new Date(episode.publishedAt ?? episode.createdAt).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" }).toUpperCase()} • {episode.type.replaceAll("_", " ").toUpperCase()}
                 </p>
                 <h4>{episode.title}</h4>
                 <span className="organic-pill organic-pill-lime small">{episode.status.toUpperCase()}</span>
@@ -101,9 +101,24 @@ export function OrganicPublishedView({ episodes, onNewBriefing, onReview, onPrev
               <strong>{episode.citations.length} SOURCES</strong>
               <small>{episode.script.split(/\s+/).filter(Boolean).length.toLocaleString()} WORDS</small>
             </div>
-            <button type="button" className="organic-kebab" aria-label="Review or play episode" onClick={() => episode.audioUrl ? onPreview(episode) : onReview(episode)}>
-              <img src="/figma/icon-kebab.svg" alt="" width={4} height={16} />
-            </button>
+            <div className="organic-history-actions">
+              {episode.audioUrl && (
+                <button
+                  type="button"
+                  className="organic-btn organic-btn-outline compact"
+                  onClick={() => onPreview(episode)}
+                >
+                  Play
+                </button>
+              )}
+              <button
+                type="button"
+                className="organic-btn organic-btn-dark compact"
+                onClick={() => onReview(episode)}
+              >
+                Review
+              </button>
+            </div>
           </article>
         ))}
       </div>

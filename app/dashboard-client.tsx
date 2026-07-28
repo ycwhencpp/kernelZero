@@ -7,13 +7,24 @@ import {
   type OrganicView,
 } from "./components/organic/app-shell";
 import { OrganicDashboardView } from "./views/organic-dashboard-view";
+import { OrganicHistoryView } from "./views/organic-history-view";
 import { OrganicPublishedView } from "./views/organic-published-view";
 import { OrganicSourcesView } from "./views/organic-sources-view";
 import { OrganicSettingsView } from "./views/organic-settings-view";
 import { OrganicReviewView } from "./views/organic-review-view";
 import { OrganicCreateView } from "./views/organic-create-view";
+import {
+  clampPlaybackSeconds,
+  PLAYBACK_RATES,
+} from "../lib/playback";
+import {
+  reconcileGeneratedEpisode,
+  requireGeneratedAudio,
+} from "../lib/generated-episode";
+import { buildRegenerateEpisodeRequest } from "../lib/podcast-regeneration";
 
 type Modal = "interest" | "source" | null;
+type AudioStatus = "missing" | "loading" | "ready" | "error";
 
 function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   return fetch(input, {
@@ -35,6 +46,7 @@ function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
 
 const pageTitles: Record<OrganicView, string> = {
   dashboard: "Overview",
+  history: "Run History",
   published: "Published Episodes",
   sources: "Manage Sources",
   settings: "Settings",
@@ -53,8 +65,21 @@ export function DashboardClient({
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
+  const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(
+    null,
+  );
+  const [reviewReturnView, setReviewReturnView] =
+    useState<OrganicView>("dashboard");
+  const [playbackSeconds, setPlaybackSeconds] = useState(0);
+  const [playbackDuration, setPlaybackDuration] = useState(0);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [audioStatus, setAudioStatus] = useState<AudioStatus>("missing");
   const [footerYear] = useState(() => new Date().getFullYear());
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const pendingSeekRef = useRef<{
+    episodeId: string;
+    seconds: number;
+  } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const digest = useMemo(
@@ -65,11 +90,12 @@ export function DashboardClient({
 
   const reviewEpisode = useMemo(() => {
     return (
+      state.episodes.find((episode) => episode.id === selectedEpisodeId) ??
       state.episodes.find((e) => e.status === "needs_approval") ??
       digest ??
       state.episodes[0]
     );
-  }, [state.episodes, digest]);
+  }, [state.episodes, selectedEpisodeId, digest]);
 
   const notify = (message: string) => {
     setToast(message);
@@ -77,13 +103,15 @@ export function DashboardClient({
     toastTimer.current = setTimeout(() => setToast(null), 3200);
   };
 
+  const updatePlaybackPosition = (seconds: number) => {
+    setPlaybackSeconds(seconds);
+  };
+
   useEffect(() => {
-    requestJson<DashboardState>("/api/state")
-      .then((fresh) => setState(fresh))
-      .catch(() => undefined);
+    const audio = audioRef.current;
     return () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
-      window.speechSynthesis?.cancel();
+      audio?.pause();
     };
   }, []);
 
@@ -92,25 +120,73 @@ export function DashboardClient({
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  const openReview = (episode: Episode, returnView: OrganicView = view) => {
+    audioRef.current?.pause();
+    if (audioRef.current?.dataset.episodeId === episode.id) {
+      audioRef.current.currentTime = 0;
+    }
+    pendingSeekRef.current = null;
+    updatePlaybackPosition(0);
+    setPlaybackDuration(0);
+    setAudioStatus(episode.audioUrl ? "loading" : "missing");
+    setSelectedEpisodeId(episode.id);
+    setReviewReturnView(
+      returnView === "review" || returnView === "create"
+        ? "dashboard"
+        : returnView,
+    );
+    setView("review");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (episode.audioUrl) loadEpisodeAudio(episode);
+  };
+
   const generateEpisode = async (
     type: Episode["type"],
     itemIds: string[] = [],
     episodeLength?: EpisodeLength,
+    regeneration?: {
+      episode: Episode;
+      currentDraft: string;
+    },
   ) => {
-    setBusy(`generate:${itemIds[0] ?? type}`);
+    setBusy(
+      regeneration
+        ? `regenerate:${regeneration.episode.id}`
+        : `generate:${itemIds[0] ?? type}`,
+    );
     try {
+      const requestBody = regeneration
+        ? buildRegenerateEpisodeRequest(
+            state,
+            regeneration.episode,
+            regeneration.currentDraft,
+          )
+        : { type, itemIds, includeAudio: true, episodeLength };
       const payload = await requestJson<{
         episode: Episode;
         provider: "openai" | "gemini" | "ollama";
         state: DashboardState;
       }>("/api/generate", {
         method: "POST",
-        body: JSON.stringify({ type, itemIds, includeAudio: true, episodeLength }),
+        body: JSON.stringify(requestBody),
       });
-      setState(payload.state);
+      const generated = reconcileGeneratedEpisode(
+        payload.state,
+        payload.episode,
+      );
+      requireGeneratedAudio(generated.episode, requestBody.includeAudio);
+      setState(generated.state);
+      setSelectedEpisodeId(generated.episode.id);
+      setReviewReturnView("dashboard");
+      updatePlaybackPosition(0);
+      setPlaybackDuration(0);
+      setAudioStatus(generated.episode.audioUrl ? "loading" : "missing");
       setView("review");
+      if (generated.episode.audioUrl) loadEpisodeAudio(generated.episode);
       notify(
-        "Evidence-checked script and local audio are ready for review.",
+        regeneration
+          ? "Draft regenerated from the current version and is ready for review."
+          : "Evidence-checked script and local audio are ready for review.",
       );
     } catch (error) {
       notify(error instanceof Error ? error.message : "Generation failed.");
@@ -136,42 +212,174 @@ export function DashboardClient({
     }
   };
 
-  const previewEpisode = (episode: Episode) => {
-    if (episode.audioUrl) {
-      if (!audioRef.current || audioRef.current.src !== episode.audioUrl) {
-        audioRef.current?.pause();
-        audioRef.current = new Audio(episode.audioUrl);
-        audioRef.current.onended = () => setPlayingId(null);
-      }
-      if (playingId === episode.id) {
-        audioRef.current.pause();
+  const loadEpisodeAudio = (episode: Episode): HTMLAudioElement | null => {
+    if (!episode.audioUrl) return null;
+    const audio = audioRef.current;
+    if (!audio) return null;
+    if (
+      audio.dataset.episodeId !== episode.id ||
+      audio.getAttribute("src") !== episode.audioUrl
+    ) {
+      audio.pause();
+      setAudioStatus("loading");
+      audio.src = episode.audioUrl;
+      audio.dataset.episodeId = episode.id;
+      audio.preload = "auto";
+      audio.defaultPlaybackRate = playbackRate;
+      audio.playbackRate = playbackRate;
+
+      const applyPendingSeek = () => {
+        const pending = pendingSeekRef.current;
+        if (
+          pending?.episodeId !== episode.id ||
+          audio.readyState < 1
+        ) {
+          return;
+        }
+        const duration =
+          Number.isFinite(audio.duration) && audio.duration > 0
+            ? audio.duration
+            : episode.durationSeconds;
+        const target = Math.max(0, Math.min(duration, pending.seconds));
+        if (Math.abs(audio.currentTime - target) < 0.25) {
+          pendingSeekRef.current = null;
+          updatePlaybackPosition(audio.currentTime);
+          return;
+        }
+        try {
+          audio.currentTime = target;
+          updatePlaybackPosition(target);
+        } catch {
+          // Some browsers need canplay before accepting a seek.
+        }
+      };
+      const updateDuration = () => {
+        if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+        setPlaybackDuration(audio.duration);
+        setAudioStatus("ready");
+        applyPendingSeek();
+      };
+      audio.onloadedmetadata = updateDuration;
+      audio.ondurationchange = updateDuration;
+      audio.oncanplay = applyPendingSeek;
+      audio.onplaying = applyPendingSeek;
+      audio.onplay = () => setPlayingId(episode.id);
+      audio.onpause = () => {
+        if (!audio.ended) setPlayingId(null);
+      };
+      audio.ontimeupdate = () => {
+        const pending = pendingSeekRef.current;
+        if (pending?.episodeId === episode.id) {
+          if (Math.abs(audio.currentTime - pending.seconds) < 0.75) {
+            pendingSeekRef.current = null;
+          } else {
+            return;
+          }
+        }
+        updatePlaybackPosition(audio.currentTime);
+      };
+      audio.onseeked = () => {
+        const pending = pendingSeekRef.current;
+        if (
+          pending?.episodeId === episode.id &&
+          Math.abs(audio.currentTime - pending.seconds) < 0.75
+        ) {
+          pendingSeekRef.current = null;
+        } else if (pending?.episodeId === episode.id) {
+          applyPendingSeek();
+          return;
+        }
+        updatePlaybackPosition(audio.currentTime);
+      };
+      audio.onended = () => {
+        updatePlaybackPosition(audio.duration || episode.durationSeconds);
         setPlayingId(null);
-        return;
-      }
-      void audioRef.current.play();
-      setPlayingId(episode.id);
-      return;
+      };
+      audio.onerror = () => {
+        setPlayingId(null);
+        setAudioStatus("error");
+        notify("Stored audio could not be loaded.");
+      };
+      updatePlaybackPosition(0);
+      setPlaybackDuration(0);
+      audio.load();
+    } else if (Number.isFinite(audio.duration) && audio.duration > 0) {
+      setPlaybackDuration(audio.duration);
+      setAudioStatus("ready");
     }
-    if (!("speechSynthesis" in window)) {
-      notify("Audio preview is unavailable in this browser.");
-      return;
-    }
-    if (playingId === episode.id) {
-      window.speechSynthesis.cancel();
-      setPlayingId(null);
-      return;
-    }
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(episode.script.slice(0, 1100));
-    utterance.rate = 0.96;
-    utterance.onend = () => setPlayingId(null);
-    window.speechSynthesis.speak(utterance);
-    setPlayingId(episode.id);
+    return audio;
   };
 
-  const seekEpisode = (delta: number) => {
-    if (!audioRef.current) return;
-    audioRef.current.currentTime = Math.max(0, Math.min(audioRef.current.duration || Infinity, audioRef.current.currentTime + delta));
+  const previewEpisode = (episode: Episode) => {
+    if (!episode.audioUrl) {
+      notify("This run has no audio file. Generate audio from the Review page.");
+      return;
+    }
+    const audio = loadEpisodeAudio(episode);
+    if (!audio) return;
+    if (!audio.paused) {
+      audio.pause();
+      return;
+    }
+    void audio.play().catch(() =>
+      notify("Stored audio could not be played."),
+    );
+  };
+
+  const seekEpisode = (episode: Episode, delta: number) => {
+    if (!episode.audioUrl) return;
+    const pending = pendingSeekRef.current;
+    const currentSeconds =
+      pending?.episodeId === episode.id
+        ? pending.seconds
+        : audioRef.current?.dataset.episodeId === episode.id
+          ? audioRef.current.currentTime
+          : playbackSeconds;
+    seekEpisodeTo(episode, currentSeconds + delta);
+  };
+
+  const seekEpisodeTo = (episode: Episode, seconds: number) => {
+    if (!episode.audioUrl) return;
+
+    const audio = loadEpisodeAudio(episode);
+    const duration =
+      audio && Number.isFinite(audio.duration) && audio.duration > 0
+        ? audio.duration
+        : playbackDuration || episode.durationSeconds;
+    const target = clampPlaybackSeconds(seconds, duration);
+    if (!audio) {
+      updatePlaybackPosition(target);
+      return;
+    }
+
+    pendingSeekRef.current = { episodeId: episode.id, seconds: target };
+    if (audio.readyState >= 1) {
+      try {
+        if (Math.abs(audio.currentTime - target) < 0.25) {
+          pendingSeekRef.current = null;
+        } else {
+          audio.currentTime = target;
+        }
+      } catch {
+        // The loadedmetadata/canplay handlers will retry this seek.
+      }
+    } else {
+      audio.load();
+    }
+    updatePlaybackPosition(target);
+  };
+
+  const changePlaybackRate = (rate: number) => {
+    const nextRate = PLAYBACK_RATES.includes(
+      rate as (typeof PLAYBACK_RATES)[number],
+    )
+      ? rate
+      : 1;
+    setPlaybackRate(nextRate);
+    if (audioRef.current) {
+      audioRef.current.defaultPlaybackRate = nextRate;
+      audioRef.current.playbackRate = nextRate;
+    }
   };
 
   const editEpisode = async (episodeId: string, script: string) => {
@@ -184,12 +392,32 @@ export function DashboardClient({
   };
 
   const regenerateEpisodeAudio = async (episodeId: string) => {
+    const hadAudio = Boolean(
+      state.episodes.find((episode) => episode.id === episodeId)?.audioUrl,
+    );
     setBusy(`audio:${episodeId}`);
+    setAudioStatus("loading");
     try {
-      const payload = await requestJson<{ state: DashboardState }>(`/api/episodes/${encodeURIComponent(episodeId)}/audio`, { method: "POST" });
-      setState(payload.state);
-      notify("Audio regenerated with the selected local narrator.");
+      const payload = await requestJson<{
+        episode: Episode;
+        state: DashboardState;
+      }>(`/api/episodes/${encodeURIComponent(episodeId)}/audio`, {
+        method: "POST",
+      });
+      const generated = reconcileGeneratedEpisode(
+        payload.state,
+        payload.episode,
+      );
+      requireGeneratedAudio(generated.episode, true);
+      setState(generated.state);
+      loadEpisodeAudio(generated.episode);
+      notify(
+        hadAudio
+          ? "Audio regenerated with the selected local narrator."
+          : "Audio generated with the selected local narrator.",
+      );
     } catch (error) {
+      setAudioStatus(hadAudio ? "error" : "missing");
       notify(error instanceof Error ? error.message : "Unable to regenerate audio.");
     } finally {
       setBusy(null);
@@ -297,35 +525,52 @@ export function DashboardClient({
       ? `${window.location.origin}/feed.xml`
       : "/feed.xml";
 
-  const shellView = view === "review" || view === "create" ? "dashboard" : view;
+  const shellView =
+    view === "review"
+      ? reviewReturnView
+      : view === "create"
+        ? "dashboard"
+        : view;
 
   return (
     <>
+      <audio ref={audioRef} preload="auto" hidden aria-hidden="true" />
       <OrganicAppShell
         view={shellView}
         onNavigate={navigate}
         onNewBriefing={() => navigate("create")}
-        pageTitle={pageTitles[view === "review" || view === "create" ? shellView : view]}
+        pageTitle={pageTitles[shellView]}
         showFab={view === "dashboard"}
         onFabClick={() => digest && previewEpisode(digest)}
         onFooterAction={(label) => notify(`${label} is not configured for this local workspace yet.`)}
         footerYear={footerYear}
+        immersive={view === "review" || view === "create"}
       >
         {view === "dashboard" && (
           <OrganicDashboardView
             state={state}
             digest={digest}
-            onReview={() => navigate(digest ? "review" : "create")}
-            onViewTranscription={() => navigate(digest ? "review" : "create")}
-            onViewHistory={() => navigate("published")}
+            onReview={(episode) => openReview(episode, "dashboard")}
+            onViewTranscription={() =>
+              digest ? openReview(digest, "dashboard") : navigate("create")
+            }
+            onViewHistory={() => navigate("history")}
             onPreview={() => digest && previewEpisode(digest)}
+          />
+        )}
+        {view === "history" && (
+          <OrganicHistoryView
+            episodes={state.episodes}
+            onNewBriefing={() => navigate("create")}
+            onReview={(episode) => openReview(episode, "history")}
+            onPreview={previewEpisode}
           />
         )}
         {view === "published" && (
           <OrganicPublishedView
             episodes={state.episodes}
             onNewBriefing={() => navigate("create")}
-            onReview={(episode) => { setView("review"); setState((current) => ({ ...current, episodes: current.episodes.map((candidate) => candidate.id === episode.id ? episode : candidate) })); }}
+            onReview={(episode) => openReview(episode, "published")}
             onPreview={previewEpisode}
           />
         )}
@@ -357,14 +602,35 @@ export function DashboardClient({
         {view === "settings" && <OrganicSettingsView state={state} feedUrl={feedUrl} onDeleteWorkspace={() => void deleteWorkspace()} busy={busy !== null} onNotify={notify} onCreateVoice={createVoice} onDisconnectVoice={disconnectVoice} onSaveSettings={saveSettings} onSelectVoice={selectVoice} />}
         {view === "review" && reviewEpisode && (
           <OrganicReviewView
+            key={reviewEpisode.id}
             state={state}
             episode={reviewEpisode}
             playingId={playingId}
-            onBack={() => navigate("dashboard")}
+            playbackSeconds={playbackSeconds}
+            playbackDuration={playbackDuration}
+            playbackRate={playbackRate}
+            audioStatus={audioStatus}
+            backLabel={
+              reviewReturnView === "history"
+                ? "History"
+                : reviewReturnView === "published"
+                  ? "Published"
+                  : "Dashboard"
+            }
+            onBack={() => navigate(reviewReturnView)}
             onApprove={() => void approveEpisode(reviewEpisode.id)}
-            onReject={() => void generateEpisode(reviewEpisode.type)}
+            onRegenerateDraft={(currentDraft) =>
+              void generateEpisode(
+                reviewEpisode.type,
+                [],
+                state.settings.episodeLength,
+                { episode: reviewEpisode, currentDraft },
+              )
+            }
             onPreview={() => previewEpisode(reviewEpisode)}
-            onSeek={seekEpisode}
+            onSeek={(delta) => seekEpisode(reviewEpisode, delta)}
+            onSeekTo={(seconds) => seekEpisodeTo(reviewEpisode, seconds)}
+            onPlaybackRateChange={changePlaybackRate}
             onEdit={(script) => void editEpisode(reviewEpisode.id, script)}
             onRegenerateAudio={() => void regenerateEpisodeAudio(reviewEpisode.id)}
             onExport={() => exportEpisode(reviewEpisode)}

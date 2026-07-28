@@ -273,8 +273,11 @@ export function buildTechRadar(
 }
 
 export function formatDuration(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const remaining = seconds % 60;
+  const totalSeconds = Number.isFinite(seconds)
+    ? Math.max(0, Math.floor(seconds))
+    : 0;
+  const minutes = Math.floor(totalSeconds / 60);
+  const remaining = totalSeconds % 60;
   return `${minutes}:${remaining.toString().padStart(2, "0")}`;
 }
 

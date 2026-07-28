@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 
 export type OrganicView =
   | "dashboard"
+  | "history"
   | "published"
   | "sources"
   | "settings"
@@ -16,6 +17,7 @@ const navItems: Array<{
   icon: string;
 }> = [
   { id: "dashboard", label: "Dashboard", icon: "/figma/nav-dashboard.svg" },
+  { id: "history", label: "History", icon: "/figma/nav-history.svg" },
   { id: "published", label: "Published", icon: "/figma/nav-published.svg" },
   { id: "sources", label: "Sources", icon: "/figma/nav-sources.svg" },
   { id: "settings", label: "Settings", icon: "/figma/nav-settings.svg" },
@@ -40,6 +42,7 @@ export function OrganicAppShell({
   onFabClick,
   onFooterAction,
   footerYear,
+  immersive = false,
 }: {
   view: OrganicView;
   onNavigate: (view: OrganicView) => void;
@@ -51,6 +54,7 @@ export function OrganicAppShell({
   onFabClick?: () => void;
   onFooterAction?: (label: string) => void;
   footerYear: number;
+  immersive?: boolean;
 }) {
   return (
     <div className="organic-app">
@@ -83,7 +87,7 @@ export function OrganicAppShell({
       </aside>
 
       <div className="organic-main">
-        {view !== "review" && view !== "create" && (
+        {!immersive && (
           <header className="organic-topbar">
             <h2 className="organic-page-title">{pageTitle}</h2>
             {headerRight ?? (
@@ -96,7 +100,7 @@ export function OrganicAppShell({
 
         <div className="organic-canvas">{children}</div>
 
-        {view !== "review" && view !== "create" && (
+        {!immersive && (
           <footer className="organic-footer">
             <span>© {footerYear} SignalCast AI Production</span>
             <div className="organic-footer-links">

@@ -51,11 +51,28 @@ def main() -> None:
     with open(sys.argv[1], "r", encoding="utf-8") as request_file:
         request = json.load(request_file)
 
-    chunks = request.get("chunks")
+    segments = request.get("segments")
     sample_path = request.get("samplePath")
     device = request.get("device", "mps")
-    if not isinstance(chunks, list) or not chunks or not all(isinstance(chunk, str) and chunk.strip() for chunk in chunks):
-        raise ValueError("Chatterbox needs at least one non-empty narration chunk.")
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("Chatterbox needs at least one narration segment.")
+    validated_segments = []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            raise ValueError("Every Chatterbox segment must be an object.")
+        text = segment.get("text")
+        pause_ms = segment.get("pauseAfterMs")
+        if not isinstance(text, str) or not text.strip() or len(text) > 320:
+            raise ValueError("Every Chatterbox segment needs bounded narration text.")
+        if (
+            isinstance(pause_ms, bool)
+            or not isinstance(pause_ms, (int, float))
+            or not math.isfinite(float(pause_ms))
+            or pause_ms < 0
+            or pause_ms > 1200
+        ):
+            raise ValueError("Every Chatterbox pause must be between 0 and 1200 milliseconds.")
+        validated_segments.append((text.strip(), int(round(pause_ms))))
     if not isinstance(sample_path, str) or not sample_path:
         raise ValueError("Chatterbox needs a local reference recording.")
 
@@ -65,8 +82,7 @@ def main() -> None:
     model.prepare_conditionals(sample_path)
 
     parts = []
-    for index, text in enumerate(chunks):
-        cleaned_text = text.strip()
+    for index, (cleaned_text, pause_ms) in enumerate(validated_segments):
         last_error = None
         generated = None
         for attempt in range(3):
@@ -83,8 +99,9 @@ def main() -> None:
                 f"Chatterbox could not produce clear audio for chunk {index + 1}: {last_error}"
             )
         parts.append(generated)
-        if index < len(chunks) - 1:
-            parts.append(torch.zeros((1, int(model.sr * 0.28)), dtype=torch.float32))
+        if index < len(validated_segments) - 1 and pause_ms > 0:
+            pause_samples = int(model.sr * pause_ms / 1000)
+            parts.append(torch.zeros((1, pause_samples), dtype=torch.float32))
 
     torchaudio.save(sys.argv[2], torch.cat(parts, dim=1), model.sr)
 
