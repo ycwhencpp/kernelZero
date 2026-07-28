@@ -323,7 +323,7 @@ async function chat(
 const sectionPlans = [
   {
     title: "Why this matters",
-    direction: "Open with a concrete human hook, then include one brief, naturally worded sentence disclosing that the episode was written and narrated with AI. Include the same disclosure in the show notes, and never lead with it. Identify the central themes at a high level and explain why listeners should care. This is an overview only: do not include benchmark names, model names, detailed events, methods, findings, examples, or numbers that belong in later sections.",
+    direction: "Open with a concrete human hook. Identify the central themes at a high level and explain why listeners should care. This is an overview only: do not include benchmark names, model names, detailed events, methods, findings, examples, or numbers that belong in later sections.",
   },
   {
     title: "Background",
@@ -1369,8 +1369,6 @@ export async function createStructuredPodcast(
     dek: podcastPlan.dek,
     script: reviewedSections.map((section) => section.script.trim()).join("\n\n"),
     showNotes: [
-      "This episode was written and narrated with AI, then held for human review.",
-      "",
       "Sources:",
       ...items.map((item, index) => `${index + 1}. ${item.title} — ${item.canonicalUrl}`),
     ].join("\n"),

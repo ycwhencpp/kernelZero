@@ -1439,13 +1439,9 @@ test("generation rewrites an intro-sized response before creating an episode", a
       initialBody.input[0].content[0].text,
       /adult male podcast host/,
     );
-    assert.match(
-      initialBody.input[1].content[0].text,
-      /After that hook, include one brief, naturally worded sentence disclosing/,
-    );
     assert.doesNotMatch(
       initialBody.input[1].content[0].text,
-      /Open with an AI-narration disclosure|Put the AI-writing and narration disclosure in showNotes/,
+      /disclos|narrated with A\s*I|human review/i,
     );
     assert.match(
       resizeBody.input[0].content[0].text,
