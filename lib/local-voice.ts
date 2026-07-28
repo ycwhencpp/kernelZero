@@ -17,7 +17,7 @@ const extensionByType: Record<string, string> = {
 };
 
 function voiceStorageDirectory(): string {
-  return resolve(process.env.LOCAL_VOICE_STORAGE_DIR || ".signalcast/voices");
+  return resolve(process.env.LOCAL_VOICE_STORAGE_DIR || ".kernelzero/voices");
 }
 
 function validateVoiceKey(key: string): string {

@@ -25,14 +25,14 @@ async function render(pathname = "/") {
   );
 }
 
-test("server-renders the SignalCast product", async () => {
+test("server-renders the KernelZero product", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
-  assert.match(html, /<title>SignalCast — Research, distilled daily<\/title>/i);
-  assert.match(html, /signalcast/i);
+  assert.match(html, /<title>KernelZero — Research, distilled daily<\/title>/i);
+  assert.match(html, /kernelzero/i);
   assert.match(html, /Good morning, Anurag/);
   assert.match(html, /Worth your attention/);
   assert.match(html, /Podcast studio/);

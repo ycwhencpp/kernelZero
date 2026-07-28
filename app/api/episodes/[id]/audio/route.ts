@@ -13,7 +13,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     const [episode, voiceProfile] = await Promise.all([findEpisode(ownerId, id), getActiveVoiceProfile(ownerId)]);
     if (!episode) return Response.json({ error: "Episode not found." }, { status: 404 });
     if (!voiceProfile) return Response.json({ error: "Choose a local Chatterbox narrator before regenerating audio." }, { status: 400 });
-    if (process.env.VERCEL) return Response.json({ error: "Regenerate local Chatterbox audio from the local SignalCast server, not Vercel." }, { status: 400 });
+    if (process.env.VERCEL) return Response.json({ error: "Regenerate local Chatterbox audio from the local KernelZero server, not Vercel." }, { status: 400 });
     const generated = await synthesizeChatterboxSpeechWithMetadata(
       episode.script,
       voiceProfile.sampleKey,

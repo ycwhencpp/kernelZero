@@ -139,7 +139,7 @@ export function OrganicHistoryView({
         {visible.map((episode) => (
           <article key={episode.id} className="organic-episode-row">
             <div className="organic-episode-main">
-              <span className="organic-episode-thumb">SC</span>
+              <span className="organic-episode-thumb">KZ</span>
               <div>
                 <p className="organic-eyebrow">
                   {new Date(episode.createdAt)

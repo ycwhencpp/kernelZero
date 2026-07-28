@@ -1,4 +1,4 @@
--- Default interest profiles aligned with SignalCast source bundles.
+-- Default interest profiles aligned with KernelZero source bundles.
 -- Replace YOUR_OWNER_ID_HERE with profiles.id (login email / CRON_OWNER_EMAIL).
 -- Interests power OpenAlex + Semantic Scholar + arXiv discovery and RSS relevance scoring.
 

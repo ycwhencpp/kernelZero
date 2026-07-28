@@ -445,8 +445,8 @@ export function normalizePodcastPlan(
     };
   });
   const fallbackTitle = items[0]?.title
-    ? `SignalCast: ${items[0].title}`
-    : "SignalCast technology briefing";
+    ? `KernelZero: ${items[0].title}`
+    : "KernelZero technology briefing";
 
   return {
     title: typeof raw.title === "string" && raw.title.trim()
@@ -1433,7 +1433,7 @@ export async function synthesizeSpeech(script: string): Promise<ArrayBuffer> {
   if (process.platform !== "darwin") {
     throw new Error("Local speech synthesis currently requires macOS.");
   }
-  const workDir = await mkdtemp(join(tmpdir(), "signalcast-audio-"));
+  const workDir = await mkdtemp(join(tmpdir(), "kernelzero-audio-"));
   const scriptPath = join(workDir, "script.txt");
   const aiffPath = join(workDir, "speech.aiff");
   const mp3Path = join(workDir, "speech.mp3");

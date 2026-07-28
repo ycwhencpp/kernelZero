@@ -96,7 +96,7 @@ export async function fetchFeed(feedUrl: string): Promise<ParsedFeed> {
     headers: {
       Accept:
         "application/rss+xml, application/atom+xml, application/xml, text/xml",
-      "User-Agent": "SignalCast/1.0 feed reader",
+      "User-Agent": "KernelZero/1.0 feed reader",
     },
     signal: AbortSignal.timeout(10_000),
   });

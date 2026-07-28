@@ -118,7 +118,7 @@ function VoiceProfileSetup({
             className="organic-btn organic-btn-outline compact"
             disabled={busy}
             onClick={() => {
-              if (window.confirm("Remove this local voice reference from SignalCast? The uploaded sample will be deleted from this machine.")) {
+              if (window.confirm("Remove this local voice reference from KernelZero? The uploaded sample will be deleted from this machine.")) {
                 void (async () => {
                   setBusy(true);
                   try {
@@ -137,7 +137,7 @@ function VoiceProfileSetup({
         )}
       </div>
       <p className="organic-voice-copy">
-        The reference recording stays on this SignalCast machine. Supabase stores only a local file key,
+        The reference recording stays on this KernelZero machine. Supabase stores only a local file key,
         never the audio itself. It is used only after the speaker gives consent.
       </p>
       <form className="organic-voice-form" onSubmit={(event) => void submit(event)}>

@@ -1,4 +1,4 @@
-# SignalCast color palette
+# KernelZero color palette
 
 Source: `app/globals.css`
 

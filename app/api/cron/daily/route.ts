@@ -26,7 +26,7 @@ export async function GET(request: Request) {
     return Response.json({ error: "Invalid scheduler credential." }, { status: 401 });
   }
 
-  const ownerId = process.env.CRON_OWNER_EMAIL?.toLowerCase() || "local@signalcast.local";
+  const ownerId = process.env.CRON_OWNER_EMAIL?.toLowerCase() || "local@kernelzero.local";
   const dateParts = new Intl.DateTimeFormat("en", {
     timeZone: "Asia/Kolkata",
     year: "numeric",
@@ -85,7 +85,7 @@ export async function GET(request: Request) {
       throw new Error("No active local Chatterbox voice is configured for this cron owner. Save a voice in Settings before running the daily cron.");
     }
     if (voiceProfile && process.env.VERCEL) {
-      throw new Error("The selected Chatterbox voice is stored on this local SignalCast machine. Run the daily cron locally; a Vercel function cannot read the local reference recording or run Chatterbox.");
+      throw new Error("The selected Chatterbox voice is stored on this local KernelZero machine. Run the daily cron locally; a Vercel function cannot read the local reference recording or run Chatterbox.");
     }
     const discovered: typeof initialState.items = [];
     const warnings: string[] = [];

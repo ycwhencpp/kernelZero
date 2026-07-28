@@ -84,7 +84,7 @@ export function OrganicPublishedView({ episodes, onNewBriefing, onReview, onPrev
         {visible.map((episode) => (
           <article key={episode.id} className="organic-episode-row">
             <div className="organic-episode-main">
-              <span className="organic-episode-thumb">SC</span>
+              <span className="organic-episode-thumb">KZ</span>
               <div>
                 <p className="organic-eyebrow">
                   {new Date(episode.publishedAt ?? episode.createdAt).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric", timeZone: "UTC" }).toUpperCase()} • {episode.type.replaceAll("_", " ").toUpperCase()}

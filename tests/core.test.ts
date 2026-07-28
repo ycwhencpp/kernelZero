@@ -450,7 +450,7 @@ test("draft regeneration payload preserves the current topic, text, and sources"
     durationSeconds: 180,
     status: "needs_approval",
     publishedAt: null,
-    immutableGuid: "signalcast:episode-current",
+    immutableGuid: "kernelzero:episode-current",
     generation: 3,
     createdAt: "2026-07-28T00:00:00.000Z",
   };
@@ -521,7 +521,7 @@ test("generation response keeps returned audio when refreshed state is stale", (
     durationSeconds: 488,
     status: "needs_approval",
     publishedAt: null,
-    immutableGuid: "signalcast:episode-regenerated",
+    immutableGuid: "kernelzero:episode-regenerated",
     generation: 2,
     createdAt: "2026-07-28T00:00:00.000Z",
   };
@@ -1001,7 +1001,7 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
     const user = body.messages[1]?.content ?? "";
     if (system.includes("planning editor")) {
       return ndjson({
-        title: "Parallel SignalCast",
+        title: "Parallel KernelZero",
         dek: "A quality-preserving parallel briefing.",
         facts: [{
           id: "F1",
@@ -1043,7 +1043,7 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
       "daily_digest",
       "brief",
     );
-    assert.equal(generated.title, "Parallel SignalCast");
+    assert.equal(generated.title, "Parallel KernelZero");
     assert.equal(countScriptWords(generated.script), 405);
     assert.equal(generated.script.split(/\n\s*\n/).length, 7);
     assert.equal(peak, 3);

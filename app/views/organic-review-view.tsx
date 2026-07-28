@@ -235,7 +235,7 @@ export function OrganicReviewView({
       <footer className="organic-player-bar">
         <div className="organic-player-main">
           <div className="organic-player-meta">
-            <span className="organic-episode-thumb">SC</span>
+            <span className="organic-episode-thumb">KZ</span>
             <span>
               <strong>{episode.title.slice(0, 42)}</strong>
               <small>

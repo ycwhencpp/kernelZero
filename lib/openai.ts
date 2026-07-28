@@ -534,7 +534,7 @@ export async function generatePodcast(
       durationSeconds,
       status: "needs_approval",
       publishedAt: null,
-      immutableGuid: `signalcast:${episodeId}`,
+      immutableGuid: `kernelzero:${episodeId}`,
       generation: 1,
       createdAt: now,
     },

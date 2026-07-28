@@ -9,9 +9,9 @@ export async function currentOwner(): Promise<string> {
     throw new Error("AUTH_REQUIRED");
   }
   return (
-    requestHeaders.get("x-signalcast-user")?.toLowerCase() ||
+    requestHeaders.get("x-kernelzero-user")?.toLowerCase() ||
     process.env.CRON_OWNER_EMAIL?.toLowerCase() ||
-    "local@signalcast.local"
+    "local@kernelzero.local"
   );
 }
 

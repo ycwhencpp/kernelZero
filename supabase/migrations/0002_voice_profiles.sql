@@ -1,5 +1,5 @@
 -- A single active local Chatterbox narrator per workspace. The reference recording
--- remains on the SignalCast host; this table stores only its opaque local file key.
+-- remains on the KernelZero host; this table stores only its opaque local file key.
 create table if not exists voice_profiles (
   id text primary key,
   owner_id text not null unique,

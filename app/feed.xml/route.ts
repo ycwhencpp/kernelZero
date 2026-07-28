@@ -7,7 +7,7 @@ export async function GET(request: Request) {
   const configuredBase = process.env.PODCAST_BASE_URL?.replace(/\/$/, "");
   const requestUrl = new URL(request.url);
   const baseUrl = configuredBase || requestUrl.origin;
-  const title = process.env.PODCAST_TITLE || "SignalCast Daily";
+  const title = process.env.PODCAST_TITLE || "KernelZero Daily";
   const description =
     process.env.PODCAST_DESCRIPTION ||
     "Research papers and technology shifts, distilled into clear daily audio.";
@@ -38,10 +38,10 @@ export async function GET(request: Request) {
   <link>${escapeXml(baseUrl)}</link>
   <description>${escapeXml(description)}</description>
   <language>en</language>
-  <copyright>© ${new Date().getUTCFullYear()} SignalCast</copyright>
-  <managingEditor>${escapeXml(email)} (SignalCast)</managingEditor>
-  <itunes:author>SignalCast</itunes:author>
-  <itunes:owner><itunes:name>SignalCast</itunes:name><itunes:email>${escapeXml(email)}</itunes:email></itunes:owner>
+  <copyright>© ${new Date().getUTCFullYear()} KernelZero</copyright>
+  <managingEditor>${escapeXml(email)} (KernelZero)</managingEditor>
+  <itunes:author>KernelZero</itunes:author>
+  <itunes:owner><itunes:name>KernelZero</itunes:name><itunes:email>${escapeXml(email)}</itunes:email></itunes:owner>
   <itunes:explicit>false</itunes:explicit>
   <itunes:category text="Technology" />
   <itunes:image href="${escapeXml(`${baseUrl}/podcast-cover.png`)}" />

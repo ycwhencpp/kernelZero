@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const PREVIEW_SCRIPT =
-  "This is your SignalCast local voice preview. It will narrate evidence-grounded technology briefings using this voice.";
+  "This is your KernelZero local voice preview. It will narrate evidence-grounded technology briefings using this voice.";
 
 export async function POST(request: Request) {
   let temporarySampleKey: string | null = null;
