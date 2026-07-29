@@ -13,7 +13,7 @@ export async function POST(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const { id } = await context.params;
     const body = (await request.json()) as {
       action?: "saved" | "skipped" | "listened" | "rating";

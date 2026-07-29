@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 
 export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const { id } = await context.params;
     const [episode, voiceProfile] = await Promise.all([findEpisode(ownerId, id), getActiveVoiceProfile(ownerId)]);
     if (!episode) return Response.json({ error: "Episode not found." }, { status: 404 });

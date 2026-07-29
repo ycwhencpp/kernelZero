@@ -19,8 +19,10 @@ export function OrganicHistoryView({
   onReview,
   onPreview,
   onNewBriefing,
+  canCreate,
 }: {
   episodes: Episode[];
+  canCreate: boolean;
   onReview: (episode: Episode) => void;
   onPreview: (episode: Episode) => void;
   onNewBriefing: () => void;
@@ -71,13 +73,15 @@ export function OrganicHistoryView({
             generation saved in this workspace.
           </p>
         </div>
-        <button
-          type="button"
-          className="organic-btn organic-btn-lime compact"
-          onClick={onNewBriefing}
-        >
-          New Briefing
-        </button>
+        {canCreate && (
+          <button
+            type="button"
+            className="organic-btn organic-btn-lime compact"
+            onClick={onNewBriefing}
+          >
+            New Briefing
+          </button>
+        )}
       </div>
 
       <div className="organic-filters">

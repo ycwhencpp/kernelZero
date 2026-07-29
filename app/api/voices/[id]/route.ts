@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export async function PATCH(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("owner");
     const { id } = await context.params;
     await selectVoiceProfile(ownerId, id);
     return Response.json({ state: await getDashboardState(ownerId) });

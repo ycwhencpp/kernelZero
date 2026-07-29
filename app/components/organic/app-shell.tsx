@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import type { AppUser } from "../../../lib/types";
 
 export type OrganicView =
   | "dashboard"
@@ -8,6 +9,7 @@ export type OrganicView =
   | "published"
   | "sources"
   | "settings"
+  | "profile"
   | "review"
   | "create";
 
@@ -43,6 +45,8 @@ export function OrganicAppShell({
   onFooterAction,
   footerYear,
   immersive = false,
+  user,
+  canCreate,
 }: {
   view: OrganicView;
   onNavigate: (view: OrganicView) => void;
@@ -55,7 +59,13 @@ export function OrganicAppShell({
   onFooterAction?: (label: string) => void;
   footerYear: number;
   immersive?: boolean;
+  user: AppUser;
+  canCreate: boolean;
 }) {
+  const visibleNavItems = navItems.filter(
+    (item) => item.id !== "settings" || user.role === "owner",
+  );
+
   return (
     <div className="organic-app">
       <aside className="organic-sidebar">
@@ -65,7 +75,7 @@ export function OrganicAppShell({
         </div>
 
         <nav className="organic-nav" aria-label="Main">
-          {navItems.map((item) => (
+          {visibleNavItems.map((item) => (
             <button
               key={item.id}
               type="button"
@@ -78,11 +88,34 @@ export function OrganicAppShell({
           ))}
         </nav>
 
-        <div className="organic-sidebar-foot">
-          <button type="button" className="organic-btn-new" onClick={onNewBriefing}>
-            <img src="/figma/icon-plus.svg" alt="" width={10} height={10} />
-            New Briefing
+        <div className="organic-sidebar-account">
+          {canCreate && (
+            <button type="button" className="organic-btn-new" onClick={onNewBriefing}>
+              <img src="/figma/icon-plus.svg" alt="" width={10} height={10} />
+              New Briefing
+            </button>
+          )}
+          <button
+            type="button"
+            className={`organic-account-link ${view === "profile" ? "is-active" : ""}`}
+            onClick={() => onNavigate("profile")}
+          >
+            <img
+              src={user.avatarUrl || "/user-placeholder.svg"}
+              alt=""
+              width={32}
+              height={32}
+            />
+            <span>
+              <strong>{user.displayName}</strong>
+              <small>{user.role.toUpperCase()}</small>
+            </span>
           </button>
+          <form action="/auth/signout" method="post">
+            <button type="submit" className="organic-signout-link">
+              Sign out
+            </button>
+          </form>
         </div>
       </aside>
 
@@ -91,9 +124,23 @@ export function OrganicAppShell({
           <header className="organic-topbar">
             <h2 className="organic-page-title">{pageTitle}</h2>
             {headerRight ?? (
-              <div className="organic-avatar">
-                <img src="/figma/avatar.jpg" alt="Profile" />
-              </div>
+              <button
+                type="button"
+                className="organic-top-account"
+                onClick={() => onNavigate("profile")}
+                aria-label="Open account settings"
+              >
+                <span>
+                  <strong>{user.displayName}</strong>
+                  <small>{user.role.toUpperCase()}</small>
+                </span>
+                <span className="organic-avatar">
+                  <img
+                    src={user.avatarUrl || "/user-placeholder.svg"}
+                    alt=""
+                  />
+                </span>
+              </button>
             )}
           </header>
         )}

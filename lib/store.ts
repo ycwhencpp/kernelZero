@@ -32,7 +32,7 @@ async function ensureOwner(ownerId: string) {
   const { data, error: lookupError } = await db.from("profiles").select("id").eq("id", ownerId).maybeSingle();
   if (lookupError) throw new Error(`Unable to initialize profile: ${lookupError.message}`);
   if (data) return;
-  const { error } = await db.from("profiles").insert({ id: ownerId, email: ownerId, display_name: ownerId.split("@")[0] || "KernelZero user", timezone: "Asia/Kolkata", daily_budget_usd: 2 });
+  const { error } = await db.from("profiles").insert({ id: ownerId, email: ownerId, display_name: ownerId.split("@")[0] || "KernelZero user", role: "owner", workspace_owner_id: ownerId, timezone: "Asia/Kolkata", daily_budget_usd: 2 });
   if (error && !/duplicate key/i.test(error.message)) throw new Error(`Unable to initialize profile: ${error.message}`);
 }
 

@@ -9,7 +9,7 @@ export async function DELETE(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const { id } = await context.params;
     const db = getSupabase();
     if (db) {

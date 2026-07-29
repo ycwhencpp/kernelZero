@@ -10,6 +10,17 @@ export type EpisodeStatus =
 
 export type EpisodeLength = "brief" | "standard" | "deep";
 
+export type AppRole = "owner" | "editor" | "viewer";
+
+export type AppUser = {
+  id: string;
+  email: string;
+  displayName: string;
+  avatarUrl: string | null;
+  role: AppRole;
+  workspaceOwnerId: string;
+};
+
 export type WorkspaceSettings = {
   dailyGeneration: boolean;
   episodeLength: EpisodeLength;

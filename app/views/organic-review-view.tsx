@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { DashboardState, Episode } from "../../lib/types";
+import type { AppUser, DashboardState, Episode } from "../../lib/types";
 import { formatDuration } from "../../lib/domain";
 
 function titleCase(value: string): string {
@@ -28,6 +28,9 @@ export function OrganicReviewView({
   onRegenerateAudio,
   onExport,
   busy,
+  canEdit,
+  canPublish,
+  user,
 }: {
   state: DashboardState;
   episode: Episode;
@@ -48,6 +51,9 @@ export function OrganicReviewView({
   onRegenerateAudio: () => void;
   onExport: () => void;
   busy: string | null;
+  canEdit: boolean;
+  canPublish: boolean;
+  user: AppUser;
 }) {
   const evidence = state.evidence.filter((claim) => claim.episodeId === episode.id);
   const [editing, setEditing] = useState(false);
@@ -79,9 +85,10 @@ export function OrganicReviewView({
       playbackSeconds >= chapter.startSeconds ? index : active,
     0,
   );
-  const canEdit =
-    episode.status === "needs_approval" || episode.status === "draft";
-  const canApprove = episode.status === "needs_approval";
+  const canEditDraft =
+    canEdit &&
+    (episode.status === "needs_approval" || episode.status === "draft");
+  const canApprove = canPublish && episode.status === "needs_approval";
   const revealChapter = (seconds: number) => {
     if (audioReady) onSeekTo(seconds);
     const chapterIndex = chapters.reduce(
@@ -102,10 +109,10 @@ export function OrganicReviewView({
         </button>
         <div className="organic-review-user">
           <span>
-            <strong>Workspace producer</strong>
-            <small>OWNER</small>
+            <strong>{user.displayName}</strong>
+            <small>{user.role.toUpperCase()}</small>
           </span>
-          <img src="/figma/avatar.jpg" alt="" />
+          <img src={user.avatarUrl || "/user-placeholder.svg"} alt="" />
         </div>
       </header>
 
@@ -157,6 +164,10 @@ export function OrganicReviewView({
             >
               Approve and Publish
             </button>
+          ) : episode.status === "needs_approval" && !canPublish ? (
+            <span className="organic-review-state">
+              Owner approval required
+            </span>
           ) : (
             <span className="organic-review-state">
               {titleCase(episode.status)}
@@ -177,7 +188,7 @@ export function OrganicReviewView({
         <article className="organic-panel transcript">
           <div className="organic-panel-head">
             <h3>Transcript</h3>
-            {canEdit && (
+            {canEditDraft && (
               <button type="button" className="organic-text-link lime" onClick={() => { setDraft(episode.script); setEditing((value) => !value); }}>
                 {editing ? "Cancel Edit" : "Edit Text"}
               </button>

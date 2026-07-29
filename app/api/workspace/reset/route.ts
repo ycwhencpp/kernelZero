@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 /** Clears generated library, podcast, feedback, and job data without deleting cron inputs or the local voice. */
 export async function POST() {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("owner");
     await resetGeneratedWorkspaceData(ownerId);
     return Response.json({ state: await getDashboardState(ownerId) });
   } catch (error) {

@@ -10,7 +10,7 @@ export async function POST(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const { id } = await context.params;
     const state = await getDashboardState(ownerId);
     const source = state.sources.find((candidate) => candidate.id === id);

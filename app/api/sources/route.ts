@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const body = (await request.json()) as { url?: string; name?: string };
     if (!body.url) {
       return Response.json({ error: "Feed URL is required." }, { status: 400 });
