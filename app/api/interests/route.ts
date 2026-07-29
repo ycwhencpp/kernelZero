@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const body = (await request.json()) as Partial<InterestProfile>;
     const name = body.name?.trim();
     const query = body.query?.trim();

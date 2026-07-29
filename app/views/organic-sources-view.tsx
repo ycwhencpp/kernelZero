@@ -23,8 +23,10 @@ export function OrganicSourcesView({
   onOpenSource,
   onRemoveInterest,
   busy,
+  canEdit,
 }: {
   state: DashboardState;
+  canEdit: boolean;
   onAddSource: () => void;
   onAddInterest: () => void;
   onRefreshSource: (sourceId: string) => void;
@@ -36,6 +38,11 @@ export function OrganicSourcesView({
 
   return (
     <div className="organic-sources-page">
+      {!canEdit && (
+        <div className="organic-role-notice">
+          Viewer access is read-only. An owner or editor can change sources and interests.
+        </div>
+      )}
       <header className="organic-sources-header">
         <h2 className="organic-page-title inline">Manage Sources</h2>
         <div className="organic-sources-header-actions">
@@ -45,9 +52,11 @@ export function OrganicSourcesView({
           <button type="button" className="organic-text-link" onClick={() => window.open("https://status.openai.com", "_blank", "noopener,noreferrer")}>
             System Status
           </button>
-          <button type="button" className="organic-btn organic-btn-lime" onClick={onAddSource}>
-            Add New Source
-          </button>
+          {canEdit && (
+            <button type="button" className="organic-btn organic-btn-lime" onClick={onAddSource}>
+              Add New Source
+            </button>
+          )}
         </div>
       </header>
 
@@ -56,9 +65,11 @@ export function OrganicSourcesView({
           <article className="organic-panel">
             <div className="organic-panel-head">
               <h3>Interests</h3>
-              <button type="button" className="organic-text-link lime" onClick={onAddInterest}>
-                Edit All
-              </button>
+              {canEdit && (
+                <button type="button" className="organic-text-link lime" onClick={onAddInterest}>
+                  Edit All
+                </button>
+              )}
             </div>
             <p className="organic-panel-copy">
               Define keywords and entities that KernelZero prioritizes across all monitors.
@@ -67,14 +78,18 @@ export function OrganicSourcesView({
               {keywords.map(({ keyword, interestId }) => (
                   <span key={`${interestId}-${keyword}`} className="organic-tag">
                     {keyword}
-                    <button type="button" aria-label={`Remove ${keyword}`} onClick={() => onRemoveInterest(interestId)}>
-                      ×
-                    </button>
+                    {canEdit && (
+                      <button type="button" aria-label={`Remove ${keyword}`} onClick={() => onRemoveInterest(interestId)}>
+                        ×
+                      </button>
+                    )}
                   </span>
                 ))}
-              <button type="button" className="organic-tag-add" onClick={onAddInterest}>
-                + Add Topic
-              </button>
+              {canEdit && (
+                <button type="button" className="organic-tag-add" onClick={onAddInterest}>
+                  + Add Topic
+                </button>
+              )}
             </div>
           </article>
 
@@ -111,9 +126,11 @@ export function OrganicSourcesView({
                   </div>
                 </div>
                 <div className="organic-source-actions">
-                  <button type="button" aria-label="Refresh source" disabled={busy === `source:${source.id}`} onClick={() => onRefreshSource(source.id)}>
-                    ↻
-                  </button>
+                  {canEdit && (
+                    <button type="button" aria-label="Refresh source" disabled={busy === `source:${source.id}`} onClick={() => onRefreshSource(source.id)}>
+                      ↻
+                    </button>
+                  )}
                   <button type="button" aria-label="Open source" onClick={() => onOpenSource(source.url)}>
                     ✎
                   </button>
@@ -124,9 +141,11 @@ export function OrganicSourcesView({
           {state.sources.length === 0 && (
             <div className="organic-empty-panel">
               <p>No sources connected yet.</p>
-              <button type="button" className="organic-btn organic-btn-dark" onClick={onAddSource}>
-                Add New Source
-              </button>
+              {canEdit && (
+                <button type="button" className="organic-btn organic-btn-dark" onClick={onAddSource}>
+                  Add New Source
+                </button>
+              )}
             </div>
           )}
         </div>

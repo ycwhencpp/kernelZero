@@ -21,7 +21,7 @@ const PREVIEW_SCRIPT =
 export async function POST(request: Request) {
   let temporarySampleKey: string | null = null;
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("owner");
     const form = await request.formData();
     await assertChatterboxAvailable();
 

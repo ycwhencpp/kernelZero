@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export async function DELETE() {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("owner");
     await Promise.all((await deleteWorkspace(ownerId)).map((sampleKey) => deleteVoiceSample(sampleKey)));
     return Response.json({ state: await getDashboardState(ownerId) });
   } catch (error) {

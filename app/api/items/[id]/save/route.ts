@@ -12,7 +12,7 @@ export async function POST(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const { id } = await context.params;
     const body = (await request.json().catch(() => ({}))) as { saved?: boolean };
     const saved = body.saved ?? true;

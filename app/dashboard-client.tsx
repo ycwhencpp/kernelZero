@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DashboardState, Episode, EpisodeLength, WorkspaceSettings } from "../lib/types";
+import { useRouter } from "next/navigation";
+import type { AppUser, DashboardState, Episode, EpisodeLength, WorkspaceSettings } from "../lib/types";
 import {
   OrganicAppShell,
   type OrganicView,
@@ -13,6 +14,7 @@ import { OrganicSourcesView } from "./views/organic-sources-view";
 import { OrganicSettingsView } from "./views/organic-settings-view";
 import { OrganicReviewView } from "./views/organic-review-view";
 import { OrganicCreateView } from "./views/organic-create-view";
+import { OrganicProfileView } from "./views/organic-profile-view";
 import {
   clampPlaybackSeconds,
   PLAYBACK_RATES,
@@ -50,32 +52,55 @@ const pageTitles: Record<OrganicView, string> = {
   published: "Published Episodes",
   sources: "Manage Sources",
   settings: "Settings",
+  profile: "Account Settings",
   review: "",
   create: "",
 };
 
+const viewRoutes: Partial<Record<OrganicView, string>> = {
+  dashboard: "/dashboard",
+  history: "/history",
+  published: "/published",
+  sources: "/sources",
+  settings: "/settings",
+  profile: "/profile",
+  create: "/create",
+};
+
 export function DashboardClient({
   initialState,
+  user: initialUser,
+  initialView,
+  initialEpisodeId = null,
+  initialReviewReturnView = "dashboard",
 }: {
   initialState: DashboardState;
+  user: AppUser;
+  initialView: OrganicView;
+  initialEpisodeId?: string | null;
+  initialReviewReturnView?: OrganicView;
 }) {
+  const router = useRouter();
   const [state, setState] = useState(initialState);
-  const [view, setView] = useState<OrganicView>("dashboard");
+  const [user, setUser] = useState(initialUser);
+  const [view, setView] = useState<OrganicView>(initialView);
   const [modal, setModal] = useState<Modal>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(
-    null,
+    initialEpisodeId,
   );
   const [reviewReturnView, setReviewReturnView] =
-    useState<OrganicView>("dashboard");
+    useState<OrganicView>(initialReviewReturnView);
   const [playbackSeconds, setPlaybackSeconds] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [audioStatus, setAudioStatus] = useState<AudioStatus>("missing");
   const [footerYear] = useState(() => new Date().getFullYear());
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const canEdit = user.role === "owner" || user.role === "editor";
+  const canPublish = user.role === "owner";
   const pendingSeekRef = useRef<{
     episodeId: string;
     seconds: number;
@@ -116,7 +141,17 @@ export function DashboardClient({
   }, []);
 
   const navigate = (next: OrganicView) => {
+    if (next === "create" && !canEdit) {
+      notify("Your viewer role has read-only workspace access.");
+      return;
+    }
+    if (next === "settings" && user.role !== "owner") {
+      notify("Only the workspace owner can manage settings.");
+      return;
+    }
     setView(next);
+    const route = viewRoutes[next];
+    if (route) router.push(route);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -130,12 +165,15 @@ export function DashboardClient({
     setPlaybackDuration(0);
     setAudioStatus(episode.audioUrl ? "loading" : "missing");
     setSelectedEpisodeId(episode.id);
-    setReviewReturnView(
+    const nextReturnView =
       returnView === "review" || returnView === "create"
         ? "dashboard"
-        : returnView,
-    );
+        : returnView;
+    setReviewReturnView(nextReturnView);
     setView("review");
+    router.push(
+      `/review/${encodeURIComponent(episode.id)}?from=${encodeURIComponent(nextReturnView)}`,
+    );
     window.scrollTo({ top: 0, behavior: "smooth" });
     if (episode.audioUrl) loadEpisodeAudio(episode);
   };
@@ -182,6 +220,9 @@ export function DashboardClient({
       setPlaybackDuration(0);
       setAudioStatus(generated.episode.audioUrl ? "loading" : "missing");
       setView("review");
+      router.push(
+        `/review/${encodeURIComponent(generated.episode.id)}?from=dashboard`,
+      );
       if (generated.episode.audioUrl) loadEpisodeAudio(generated.episode);
       notify(
         regeneration
@@ -204,6 +245,7 @@ export function DashboardClient({
       );
       setState(payload.state);
       setView("published");
+      router.push("/published");
       notify("Episode approved and queued for the public feed.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Approval failed.");
@@ -442,6 +484,7 @@ export function DashboardClient({
       const payload = await requestJson<{ state: DashboardState }>("/api/workspace", { method: "DELETE" });
       setState(payload.state);
       setView("dashboard");
+      router.push("/dashboard");
       notify("Workspace data deleted.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to delete workspace.");
@@ -545,6 +588,8 @@ export function DashboardClient({
         onFooterAction={(label) => notify(`${label} is not configured for this local workspace yet.`)}
         footerYear={footerYear}
         immersive={view === "review" || view === "create"}
+        user={user}
+        canCreate={canEdit}
       >
         {view === "dashboard" && (
           <OrganicDashboardView
@@ -561,6 +606,7 @@ export function DashboardClient({
         {view === "history" && (
           <OrganicHistoryView
             episodes={state.episodes}
+            canCreate={canEdit}
             onNewBriefing={() => navigate("create")}
             onReview={(episode) => openReview(episode, "history")}
             onPreview={previewEpisode}
@@ -569,6 +615,7 @@ export function DashboardClient({
         {view === "published" && (
           <OrganicPublishedView
             episodes={state.episodes}
+            canCreate={canEdit}
             onNewBriefing={() => navigate("create")}
             onReview={(episode) => openReview(episode, "published")}
             onPreview={previewEpisode}
@@ -577,6 +624,7 @@ export function DashboardClient({
         {view === "sources" && (
           <OrganicSourcesView
             state={state}
+            canEdit={canEdit}
             onAddSource={() => setModal("source")}
             onAddInterest={() => setModal("interest")}
             onRefreshSource={async (sourceId) => {
@@ -600,6 +648,13 @@ export function DashboardClient({
           />
         )}
         {view === "settings" && <OrganicSettingsView state={state} feedUrl={feedUrl} onDeleteWorkspace={() => void deleteWorkspace()} busy={busy !== null} onNotify={notify} onCreateVoice={createVoice} onDisconnectVoice={disconnectVoice} onSaveSettings={saveSettings} onSelectVoice={selectVoice} />}
+        {view === "profile" && (
+          <OrganicProfileView
+            user={user}
+            onUserUpdate={setUser}
+            onNotify={notify}
+          />
+        )}
         {view === "review" && reviewEpisode && (
           <OrganicReviewView
             key={reviewEpisode.id}
@@ -619,6 +674,9 @@ export function DashboardClient({
             }
             onBack={() => navigate(reviewReturnView)}
             onApprove={() => void approveEpisode(reviewEpisode.id)}
+            canEdit={canEdit}
+            canPublish={canPublish}
+            user={user}
             onRegenerateDraft={(currentDraft) =>
               void generateEpisode(
                 reviewEpisode.type,

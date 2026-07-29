@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 export async function PATCH(request: Request) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("owner");
     const current = await getDashboardState(ownerId);
     const body = (await request.json()) as Partial<typeof current.settings>;
     const publishTime = typeof body.publishTime === "string" ? body.publishTime : current.settings.publishTime;

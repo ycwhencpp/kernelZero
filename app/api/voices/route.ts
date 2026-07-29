@@ -25,7 +25,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("owner");
     const audioSample = voiceAudioFile(form.get("audioSample"), "Voice sample");
     await assertChatterboxAvailable();
     const sampleKey = await saveVoiceSample(audioSample);
@@ -60,7 +60,7 @@ export async function POST(request: Request) {
 
 export async function DELETE() {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("owner");
     await deleteVoiceSample(await disconnectVoiceProfile(ownerId));
     return Response.json({ state: await getDashboardState(ownerId) });
   } catch (error) {

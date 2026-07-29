@@ -11,4 +11,9 @@ export function getSupabase(): SupabaseClient | null {
   });
 }
 
+/** Server-only Auth admin client used for account provisioning and role updates. */
+export function getSupabaseAuthAdmin(): SupabaseClient | null {
+  return getSupabase();
+}
+
 export const MEDIA_BUCKET = "podcast-media";

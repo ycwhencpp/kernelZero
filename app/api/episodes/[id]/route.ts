@@ -8,7 +8,7 @@ export async function PATCH(
   context: { params: Promise<{ id: string }> },
 ) {
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const { id } = await context.params;
     const body = (await request.json()) as { script?: string; transcript?: string; showNotes?: string };
     if (!body.script?.trim()) return Response.json({ error: "Script cannot be empty." }, { status: 400 });

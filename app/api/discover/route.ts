@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   const jobId = `job-discover-${Date.now()}`;
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const body = (await request.json().catch(() => ({}))) as {
       interestId?: string;
     };
@@ -54,7 +54,7 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     try {
-      const ownerId = await currentOwner();
+      const ownerId = await currentOwner("editor");
       await recordJob(ownerId, {
         id: jobId,
         stage: "Research discovery",

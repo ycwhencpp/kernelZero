@@ -29,7 +29,7 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   const jobId = `job-generate-${Date.now()}`;
   try {
-    const ownerId = await currentOwner();
+    const ownerId = await currentOwner("editor");
     const body = (await request.json()) as {
       type?: Episode["type"];
       itemIds?: string[];
@@ -209,7 +209,7 @@ export async function POST(request: Request) {
       : String(error);
     console.error(`[generate] job=${jobId} failed: ${errorMessage}`);
     try {
-      const ownerId = await currentOwner();
+      const ownerId = await currentOwner("editor");
       await recordJob(ownerId, {
         id: jobId,
         stage: "Podcast generation",

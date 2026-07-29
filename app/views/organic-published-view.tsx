@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import type { Episode } from "../../lib/types";
 import { formatDuration } from "../../lib/domain";
 
-export function OrganicPublishedView({ episodes, onNewBriefing, onReview, onPreview }: { episodes: Episode[]; onNewBriefing: () => void; onReview: (episode: Episode) => void; onPreview: (episode: Episode) => void }) {
+export function OrganicPublishedView({ episodes, canCreate, onNewBriefing, onReview, onPreview }: { episodes: Episode[]; canCreate: boolean; onNewBriefing: () => void; onReview: (episode: Episode) => void; onPreview: (episode: Episode) => void }) {
   const [query, setQuery] = useState("");
   const [timeframe, setTimeframe] = useState("all");
   const [category, setCategory] = useState("all");
@@ -41,9 +41,11 @@ export function OrganicPublishedView({ episodes, onNewBriefing, onReview, onPrev
             Published Episodes <span className="organic-archive-badge">ARCHIVE</span>
           </h2>
         </div>
-        <button type="button" className="organic-btn organic-btn-lime compact" onClick={onNewBriefing}>
-          New Briefing
-        </button>
+        {canCreate && (
+          <button type="button" className="organic-btn organic-btn-lime compact" onClick={onNewBriefing}>
+            New Briefing
+          </button>
+        )}
       </div>
 
       <div className="organic-filters">
