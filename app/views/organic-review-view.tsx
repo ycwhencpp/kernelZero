@@ -3,6 +3,10 @@
 import { useState } from "react";
 import type { AppUser, DashboardState, Episode } from "../../lib/types";
 import { formatDuration } from "../../lib/domain";
+import {
+  linkedInPostEditorDraft,
+  resolveLinkedInPostEditorValue,
+} from "../../lib/linkedin-post-editor";
 
 function titleCase(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (l) => l.toUpperCase());
@@ -26,6 +30,7 @@ export function OrganicReviewView({
   onPlaybackRateChange,
   onEdit,
   onGenerateLinkedInPost,
+  onSaveLinkedInPost,
   onRegenerateAudio,
   onExport,
   onNotify,
@@ -51,6 +56,7 @@ export function OrganicReviewView({
   onPlaybackRateChange: (rate: number) => void;
   onEdit: (script: string) => void;
   onGenerateLinkedInPost: () => Promise<string | null>;
+  onSaveLinkedInPost: (post: string) => Promise<string | null>;
   onRegenerateAudio: () => void;
   onExport: () => void;
   onNotify: (message: string) => void;
@@ -62,7 +68,20 @@ export function OrganicReviewView({
   const evidence = state.evidence.filter((claim) => claim.episodeId === episode.id);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(episode.script);
-  const [linkedInPost, setLinkedInPost] = useState<string | null>(null);
+  const persistedLinkedInPost = episode.linkedInPost ?? null;
+  const [linkedInDraft, setLinkedInDraft] = useState(() =>
+    linkedInPostEditorDraft(episode.id, persistedLinkedInPost),
+  );
+  const linkedInPost = resolveLinkedInPostEditorValue(
+    linkedInDraft,
+    episode.id,
+    persistedLinkedInPost,
+  );
+  const updateLinkedInPost = (value: string | null) => {
+    setLinkedInDraft(
+      linkedInPostEditorDraft(episode.id, persistedLinkedInPost, value),
+    );
+  };
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">(
     "idle",
   );
@@ -98,11 +117,21 @@ export function OrganicReviewView({
     (episode.status === "needs_approval" || episode.status === "draft");
   const canApprove = canPublish && episode.status === "needs_approval";
   const linkedInBusy = busy === `linkedin:${episode.id}`;
+  const linkedInSaving = busy === `linkedin-save:${episode.id}`;
+  const linkedInDirty =
+    linkedInPost !== null && linkedInPost !== persistedLinkedInPost;
   const generateLinkedInPost = async () => {
     const post = await onGenerateLinkedInPost();
     if (post !== null) {
-      setLinkedInPost(post);
+      updateLinkedInPost(post);
       setCopyStatus("idle");
+    }
+  };
+  const saveLinkedInPost = async () => {
+    if (!linkedInPost?.trim()) return;
+    const savedPost = await onSaveLinkedInPost(linkedInPost);
+    if (savedPost !== null) {
+      updateLinkedInPost(savedPost);
     }
   };
   const copyLinkedInPost = async () => {
@@ -273,8 +302,11 @@ export function OrganicReviewView({
             <textarea
               id="linkedin-post-copy"
               value={linkedInPost}
+              readOnly={!canEdit || busy !== null}
+              aria-busy={linkedInBusy || linkedInSaving}
+              maxLength={3000}
               onChange={(event) => {
-                setLinkedInPost(event.target.value);
+                updateLinkedInPost(event.target.value);
                 setCopyStatus("idle");
               }}
               rows={10}
@@ -298,15 +330,30 @@ export function OrganicReviewView({
                   : ""}
             </span>
             <div className="organic-linkedin-post-actions">
-              <button
-                type="button"
-                className="organic-btn organic-btn-outline compact"
-                disabled={busy !== null}
-                aria-busy={linkedInBusy}
-                onClick={() => void generateLinkedInPost()}
-              >
-                {linkedInBusy ? "Regenerating…" : "Regenerate"}
-              </button>
+              {canEdit && (
+                <>
+                  <button
+                    type="button"
+                    className="organic-btn organic-btn-outline compact"
+                    disabled={busy !== null}
+                    aria-busy={linkedInBusy}
+                    onClick={() => void generateLinkedInPost()}
+                  >
+                    {linkedInBusy ? "Regenerating…" : "Regenerate"}
+                  </button>
+                  <button
+                    type="button"
+                    className="organic-btn organic-btn-outline compact"
+                    disabled={
+                      busy !== null || !linkedInDirty || !linkedInPost.trim()
+                    }
+                    aria-busy={linkedInSaving}
+                    onClick={() => void saveLinkedInPost()}
+                  >
+                    {linkedInSaving ? "Saving…" : "Save changes"}
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 className="organic-btn organic-btn-lime compact"

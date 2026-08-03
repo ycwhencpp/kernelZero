@@ -113,6 +113,7 @@ export type Episode = {
   script: string;
   showNotes: string;
   transcript: string;
+  linkedInPost?: string | null;
   citations: Citation[];
   chapters: Chapter[];
   audioUrl: string | null;

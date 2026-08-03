@@ -8,12 +8,18 @@ import type { Collection, ContentItem, DashboardState, Episode, EvidenceClaim, I
 // Supabase rows are intentionally schema-flexible at this server boundary.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
+export class EpisodeNotFoundError extends Error {
+  constructor(message = "Episode not found.") {
+    super(message);
+    this.name = "EpisodeNotFoundError";
+  }
+}
 const iso = (value: unknown) => value ? new Date(String(value)).toISOString() : null;
 const array = <T>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
 function mapInterest(row: Row): InterestProfile { return { id: row.id, name: row.name, query: row.query, keywords: array(row.keywords_json), exclusions: array(row.exclusions_json), preferredSources: array(row.preferred_sources_json), freshnessDays: row.freshness_days, weight: Number(row.weight), enabled: Boolean(row.enabled) }; }
 function mapSource(row: Row): Source { return { id: row.id, name: row.name, type: row.type, url: row.url, trustLevel: row.trust_level, rightsMode: row.rights_mode, enabled: Boolean(row.enabled), lastSuccessfulFetch: iso(row.last_successful_fetch) }; }
 function mapItem(row: Row): ContentItem { return { id: row.id, kind: row.kind, title: row.title, summary: row.summary, authors: array(row.authors_json), sourceName: row.source_name, sourceId: row.source_id ?? undefined, canonicalUrl: row.canonical_url, doi: row.doi ?? undefined, arxivId: row.arxiv_id ?? undefined, publishedAt: iso(row.published_at)!, accessLevel: row.access_level, peerReviewState: row.peer_review_state, topics: array(row.topics_json), score: Number(row.score), trend: row.trend, citationCount: Number(row.citation_count), readingMinutes: Number(row.reading_minutes), saved: Boolean(row.saved), listened: Boolean(row.listened), processingState: row.processing_state }; }
-function mapEpisode(row: Row): Episode { const audioKey = typeof row.audio_key === "string" ? row.audio_key : null; return { id: row.id, contentItemId: row.content_item_id ?? undefined, type: row.type, title: row.title, dek: row.dek, script: row.script, showNotes: row.show_notes, transcript: row.transcript, citations: array(row.citations_json), chapters: array(row.chapters_json), audioUrl: audioKey ? mediaUrl(audioKey) : row.audio_url, audioKey, audioBytes: row.audio_bytes, durationSeconds: Number(row.duration_seconds), status: row.status, publishedAt: iso(row.published_at), immutableGuid: row.immutable_guid, generation: Number(row.generation), createdAt: iso(row.created_at)! }; }
+function mapEpisode(row: Row): Episode { const audioKey = typeof row.audio_key === "string" ? row.audio_key : null; return { id: row.id, contentItemId: row.content_item_id ?? undefined, type: row.type, title: row.title, dek: row.dek, script: row.script, showNotes: row.show_notes, transcript: row.transcript, linkedInPost: typeof row.linkedin_post === "string" ? row.linkedin_post : null, citations: array(row.citations_json), chapters: array(row.chapters_json), audioUrl: audioKey ? mediaUrl(audioKey) : row.audio_url, audioKey, audioBytes: row.audio_bytes, durationSeconds: Number(row.duration_seconds), status: row.status, publishedAt: iso(row.published_at), immutableGuid: row.immutable_guid, generation: Number(row.generation), createdAt: iso(row.created_at)! }; }
 function mapEvidence(row: Row): EvidenceClaim { return { id: row.id, episodeId: row.episode_id, contentItemId: row.content_item_id, claim: row.claim, support: row.support, sourceUrl: row.source_url, confidence: normalizeEvidenceConfidence(row.confidence), location: row.location }; }
 function mapVoiceProfile(row: Row): VoiceProfile { return { id: row.id, name: row.display_name, provider: "chatterbox", active: Boolean(row.active), createdAt: iso(row.created_at)! }; }
 function workspaceSettings(row: Row | null | undefined): WorkspaceSettings { return { dailyGeneration: row?.daily_generation_enabled ?? true, episodeLength: normalizeEpisodeLength(row?.episode_length), publishTime: typeof row?.publish_time === "string" && /^\d{2}:\d{2}$/.test(row.publish_time) ? row.publish_time : "08:00" }; }
@@ -23,7 +29,7 @@ function itemRow(ownerId: string, value: ContentItem): Row { return { id: value.
 export function storedDurationSeconds(value: number): number {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
-function episodeRow(ownerId: string, value: Episode): Row { return { id: value.id, owner_id: ownerId, content_item_id: value.contentItemId ?? null, type: value.type, title: value.title, dek: value.dek, script: value.script, show_notes: value.showNotes, transcript: value.transcript, citations_json: value.citations, citation_count: value.citations.length, chapters_json: value.chapters, audio_url: value.audioUrl, audio_key: value.audioKey ?? null, audio_bytes: value.audioBytes ?? null, duration_seconds: storedDurationSeconds(value.durationSeconds), status: value.status, published_at: value.publishedAt, immutable_guid: value.immutableGuid, generation: value.generation, created_at: value.createdAt, updated_at: new Date().toISOString() }; }
+function episodeRow(ownerId: string, value: Episode): Row { return { id: value.id, owner_id: ownerId, content_item_id: value.contentItemId ?? null, type: value.type, title: value.title, dek: value.dek, script: value.script, show_notes: value.showNotes, transcript: value.transcript, linkedin_post: value.linkedInPost ?? null, citations_json: value.citations, citation_count: value.citations.length, chapters_json: value.chapters, audio_url: value.audioUrl, audio_key: value.audioKey ?? null, audio_bytes: value.audioBytes ?? null, duration_seconds: storedDurationSeconds(value.durationSeconds), status: value.status, published_at: value.publishedAt, immutable_guid: value.immutableGuid, generation: value.generation, created_at: value.createdAt, updated_at: new Date().toISOString() }; }
 
 async function requireDb() { return getSupabase(); }
 export async function findAuthenticatedOwnerIdByEmail(
@@ -270,15 +276,38 @@ export async function replaceEpisodeAudio(
   };
 }
 export async function approveEpisode(ownerId: string, episodeId: string) { const db = await requireDb(); if (!db) return; const { data } = await db.from("episodes").select("audio_key, audio_url, published_at").eq("id", episodeId).eq("owner_id", ownerId).single(); if (!data) return; const hasAudio = Boolean(data.audio_key || data.audio_url); await db.from("episodes").update({ status: hasAudio ? "published" : "approved", published_at: hasAudio ? (data.published_at ?? new Date().toISOString()) : null, updated_at: new Date().toISOString() }).eq("id", episodeId).eq("owner_id", ownerId); }
-export async function updateEpisode(ownerId: string, episodeId: string, patch: Pick<Partial<Episode>, "script" | "transcript" | "showNotes">) {
+export async function updateEpisode(ownerId: string, episodeId: string, patch: Pick<Partial<Episode>, "script" | "transcript" | "showNotes" | "linkedInPost">) {
   const db = await requireDb();
   if (!db) return;
   const updates: Row = { updated_at: new Date().toISOString() };
   if (typeof patch.script === "string") updates.script = patch.script;
   if (typeof patch.transcript === "string") updates.transcript = patch.transcript;
   if (typeof patch.showNotes === "string") updates.show_notes = patch.showNotes;
+  if (typeof patch.linkedInPost === "string" || patch.linkedInPost === null) updates.linkedin_post = patch.linkedInPost;
   const { error } = await db.from("episodes").update(updates).eq("id", episodeId).eq("owner_id", ownerId);
   if (error) throw new Error(error.message);
+}
+export async function saveLinkedInPost(ownerId: string, episodeId: string, post: string): Promise<Episode> {
+  const db = await requireDb();
+  if (!db) throw new Error("Supabase is not configured. A LinkedIn post needs durable workspace storage.");
+  const { data, error } = await db
+    .from("episodes")
+    .update({ linkedin_post: post, updated_at: new Date().toISOString() })
+    .eq("id", episodeId)
+    .eq("owner_id", ownerId)
+    .select()
+    .maybeSingle();
+  if (error) {
+    const migrationHint =
+      error.code === "PGRST204" || /linkedin_post/i.test(error.message)
+        ? " Run the latest Supabase migration first."
+        : "";
+    throw new Error(
+      `Unable to save the LinkedIn post.${migrationHint} ${error.message}`,
+    );
+  }
+  if (!data) throw new EpisodeNotFoundError();
+  return mapEpisode(data);
 }
 export async function deleteWorkspace(ownerId: string): Promise<string[]> {
   const db = await requireDb();

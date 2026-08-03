@@ -41,17 +41,29 @@ import {
   safeAvatarUrl,
 } from "../lib/profile-avatar.ts";
 import {
+  createLinkedInPost as createGeminiLinkedInPost,
+} from "../lib/gemini.ts";
+import {
   hasUsableAudioUrl,
   reconcileGeneratedEpisode,
   requireGeneratedAudio,
 } from "../lib/generated-episode.ts";
 import {
   LINKEDIN_POST_MAX_CHARACTERS,
+  LINKEDIN_POST_PROMPT,
+  LINKEDIN_POST_STYLE_ANCHORS,
+  LINKEDIN_POST_SYSTEM_PROMPT,
   generateLinkedInPost,
+  linkedinPostSchema,
   linkedinPostPrompt,
   normalizeLinkedInPost,
 } from "../lib/linkedin-post.ts";
 import {
+  linkedInPostEditorDraft,
+  resolveLinkedInPostEditorValue,
+} from "../lib/linkedin-post-editor.ts";
+import {
+  createLinkedInPost as createOllamaLinkedInPost,
   createStructuredPodcast as createOllamaPodcast,
   hasDanglingNarrationEnding,
   isActionableEvidenceIssue,
@@ -91,7 +103,11 @@ import {
   removeRepeatedSentencesAgainstReference,
 } from "../lib/script-repetition.ts";
 import { splitNarrationSentences } from "../lib/sentence-segmentation.ts";
-import { storedDurationSeconds } from "../lib/store.ts";
+import {
+  EpisodeNotFoundError,
+  saveLinkedInPost,
+  storedDurationSeconds,
+} from "../lib/store.ts";
 import type {
   ContentItem,
   Episode,
@@ -854,26 +870,149 @@ test("LinkedIn post prompts include the saved episode title and transcript as un
   assert.match(prompt, /not instructions/i);
 });
 
-test("LinkedIn post output validation trims a valid post", () => {
+test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors", () => {
+  assert.match(LINKEDIN_POST_PROMPT, /Anurag's personal LinkedIn presence/);
+  assert.match(LINKEDIN_POST_PROMPT, /MODE A: CONCEPT EXPLAINER/);
+  assert.match(LINKEDIN_POST_PROMPT, /MODE B: BUILD-IN-PUBLIC DEBUGGING STORY/);
+  assert.match(LINKEDIN_POST_PROMPT, /Exactly one dry joke or wink per post/);
+  assert.match(LINKEDIN_POST_PROMPT, /120-220 words/);
+  assert.match(LINKEDIN_POST_STYLE_ANCHORS, /Cache Me If You Can!/);
+  assert.ok(LINKEDIN_POST_SYSTEM_PROMPT.includes(LINKEDIN_POST_PROMPT));
+  assert.ok(LINKEDIN_POST_SYSTEM_PROMPT.includes(LINKEDIN_POST_STYLE_ANCHORS));
+  assert.match(LINKEDIN_POST_SYSTEM_PROMPT, /only factual source/i);
+});
+
+test("LinkedIn post schema requests the four structured output fields", () => {
+  assert.deepEqual(linkedinPostSchema(), {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      mode: {
+        type: "string",
+        enum: ["concept_explainer", "debugging_story"],
+      },
+      title: { type: "string" },
+      body: { type: "string" },
+      hashtags: {
+        type: "array",
+        items: { type: "string" },
+      },
+    },
+    required: ["mode", "title", "body", "hashtags"],
+  });
+});
+
+const validLinkedInDraft = {
+  mode: "concept_explainer",
+  title: "Cache Me If You Can! 🏃‍♂️",
+  body: "A request should not redo expensive work every time.\r\n\r\nRead → Cache → Reuse → Respond",
+  hashtags: ["#Caching", "#Backend", "#SystemDesign", "#Engineering", "#Performance"],
+} as const;
+
+test("LinkedIn post output validation composes and normalizes a structured draft", () => {
   assert.deepEqual(
-    normalizeLinkedInPost({ post: "  A concise, useful LinkedIn post.  \n" }),
-    { post: "A concise, useful LinkedIn post." },
+    normalizeLinkedInPost(validLinkedInDraft),
+    {
+      post: [
+        "Cache Me If You Can! 🏃‍♂️",
+        "A request should not redo expensive work every time.\n\nRead → Cache → Reuse → Respond",
+        "#Caching #Backend #SystemDesign #Engineering #Performance",
+      ].join("\n\n"),
+    },
   );
 });
 
-test("LinkedIn post output validation rejects missing, empty, and non-string posts", () => {
+test("LinkedIn post output validation rejects malformed structured drafts", () => {
   assert.throws(() => normalizeLinkedInPost({}), /post/i);
-  assert.throws(() => normalizeLinkedInPost({ post: " \n\t " }), /post/i);
-  assert.throws(() => normalizeLinkedInPost({ post: 42 }), /post/i);
+  assert.throws(
+    () => normalizeLinkedInPost({ ...validLinkedInDraft, mode: "marketing" }),
+    /post/i,
+  );
+  assert.throws(
+    () => normalizeLinkedInPost({ ...validLinkedInDraft, body: " \n\t " }),
+    /empty/i,
+  );
+  assert.throws(
+    () => normalizeLinkedInPost({ ...validLinkedInDraft, title: 42 }),
+    /post/i,
+  );
+  assert.throws(
+    () => normalizeLinkedInPost({ ...validLinkedInDraft, extra: true }),
+    /post/i,
+  );
+});
+
+test("LinkedIn post output validation enforces five to seven unique hashtags", () => {
+  assert.throws(
+    () => normalizeLinkedInPost({ ...validLinkedInDraft, hashtags: ["#AI"] }),
+    /5-7 hashtags/i,
+  );
+  assert.throws(
+    () =>
+      normalizeLinkedInPost({
+        ...validLinkedInDraft,
+        hashtags: ["#AI", "#Backend", "#SystemDesign", "#Engineering", "AI"],
+      }),
+    /invalid.*hashtags/i,
+  );
+  assert.throws(
+    () =>
+      normalizeLinkedInPost({
+        ...validLinkedInDraft,
+        hashtags: ["#AI", "#ai", "#SystemDesign", "#Engineering", "#Backend"],
+      }),
+    /duplicate.*hashtags/i,
+  );
 });
 
 test("LinkedIn post output validation rejects posts over the exported limit", () => {
   assert.throws(
     () =>
       normalizeLinkedInPost({
-        post: "x".repeat(LINKEDIN_POST_MAX_CHARACTERS + 1),
+        ...validLinkedInDraft,
+        body: "x".repeat(LINKEDIN_POST_MAX_CHARACTERS + 1),
       }),
     new RegExp(String(LINKEDIN_POST_MAX_CHARACTERS)),
+  );
+});
+
+test("LinkedIn editor hydrates persisted posts without discarding unrelated local edits", () => {
+  const localDraft = linkedInPostEditorDraft(
+    "episode-1",
+    "Generated post",
+    "Locally refined post",
+  );
+  assert.equal(
+    resolveLinkedInPostEditorValue(
+      localDraft,
+      "episode-1",
+      "Generated post",
+    ),
+    "Locally refined post",
+  );
+  assert.equal(
+    resolveLinkedInPostEditorValue(
+      localDraft,
+      "episode-1",
+      "Saved refined post",
+    ),
+    "Saved refined post",
+  );
+  assert.equal(
+    resolveLinkedInPostEditorValue(
+      localDraft,
+      "episode-2",
+      "Another episode post",
+    ),
+    "Another episode post",
+  );
+  assert.equal(
+    resolveLinkedInPostEditorValue(
+      linkedInPostEditorDraft("episode-1", "Persisted after refresh"),
+      "episode-1",
+      "Persisted after refresh",
+    ),
+    "Persisted after refresh",
   );
 });
 
@@ -881,7 +1020,7 @@ test("LinkedIn post generation uses the configured provider and returns its norm
   const originalFetch = globalThis.fetch;
   const originalProvider = process.env.AI_PROVIDER;
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
-  let requestBody: Record<string, unknown> | null = null;
+  let requestBody: Record<string, unknown> = {};
 
   process.env.AI_PROVIDER = "openai";
   process.env.OPENAI_API_KEY = "test-key";
@@ -890,7 +1029,10 @@ test("LinkedIn post generation uses the configured provider and returns its norm
     return new Response(
       JSON.stringify({
         output_text: JSON.stringify({
-          post: "  A grounded LinkedIn post generated from the transcript.  ",
+          mode: "concept_explainer",
+          title: "A Grounded Post 🧠",
+          body: "A grounded LinkedIn post generated from the transcript.",
+          hashtags: ["#AI", "#Backend", "#Systems", "#Engineering", "#Podcast"],
         }),
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
@@ -904,19 +1046,171 @@ test("LinkedIn post generation uses the configured provider and returns its norm
     });
 
     assert.deepEqual(result, {
-      post: "A grounded LinkedIn post generated from the transcript.",
+      post:
+        "A Grounded Post 🧠\n\nA grounded LinkedIn post generated from the transcript.\n\n#AI #Backend #Systems #Engineering #Podcast",
       provider: "openai",
     });
     assert.match(
       JSON.stringify(requestBody),
       /transcript-only fact used to build the social post/,
     );
+    assert.match(JSON.stringify(requestBody), /BUILD-IN-PUBLIC DEBUGGING STORY/);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalProvider === undefined) delete process.env.AI_PROVIDER;
     else process.env.AI_PROVIDER = originalProvider;
     if (originalOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalOpenAiKey;
+  }
+});
+
+test("Gemini and Ollama LinkedIn adapters use the shared structured contract", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalGeminiKey = process.env.GEMINI_API_KEY;
+  const originalOllamaBaseUrl = process.env.OLLAMA_BASE_URL;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const providerDraft = {
+    mode: "debugging_story",
+    title: "The Cache Was Innocent 🔍",
+    body: "First instinct was the cache. The transcript established a different cause.",
+    hashtags: ["#Debugging", "#Backend", "#Caching", "#Engineering", "#Systems"],
+  };
+
+  process.env.GEMINI_API_KEY = "test-gemini-key";
+  process.env.OLLAMA_BASE_URL = "http://ollama.test";
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requests.push({ url, body });
+    if (url.includes("generativelanguage.googleapis.com")) {
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: JSON.stringify(providerDraft) }],
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (url === "http://ollama.test/api/chat") {
+      const line = `${JSON.stringify({
+        message: { content: JSON.stringify(providerDraft) },
+        done: true,
+        done_reason: "stop",
+      })}\n`;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(line));
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+      );
+    }
+    throw new Error(`Unexpected provider request: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    assert.deepEqual(
+      await createGeminiLinkedInPost("Episode", "Transcript fact."),
+      providerDraft,
+    );
+    assert.deepEqual(
+      await createOllamaLinkedInPost("Episode", "Transcript fact."),
+      providerDraft,
+    );
+    const geminiConfig = requests[0].body.generationConfig as Record<
+      string,
+      unknown
+    >;
+    assert.deepEqual(geminiConfig.responseJsonSchema, linkedinPostSchema());
+    assert.deepEqual(requests[1].body.format, linkedinPostSchema());
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalGeminiKey;
+    if (originalOllamaBaseUrl === undefined) delete process.env.OLLAMA_BASE_URL;
+    else process.env.OLLAMA_BASE_URL = originalOllamaBaseUrl;
+  }
+});
+
+test("LinkedIn post persistence writes and maps the owner-scoped episode column", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const originalServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  let requestUrl = "";
+  let requestMethod = "";
+  let requestBody: Record<string, unknown> = {};
+  let returnMissingEpisode = false;
+  const savedPost = "Saved title\n\nSaved body\n\n#One #Two #Three #Four #Five";
+
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  globalThis.fetch = (async (input, init) => {
+    requestUrl = String(input);
+    requestMethod = init?.method ?? "GET";
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(
+      JSON.stringify(returnMissingEpisode ? [] : {
+        id: "episode-linkedin",
+        owner_id: "owner-1",
+        type: "daily_digest",
+        title: "Saved episode",
+        dek: "",
+        script: "Episode script",
+        show_notes: "",
+        transcript: "Episode transcript",
+        linkedin_post: savedPost,
+        citations_json: [],
+        chapters_json: [],
+        audio_url: null,
+        audio_key: null,
+        audio_bytes: null,
+        duration_seconds: 60,
+        status: "needs_approval",
+        published_at: null,
+        immutable_guid: "kernelzero:episode-linkedin",
+        generation: 1,
+        created_at: "2026-08-03T00:00:00.000Z",
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const episode = await saveLinkedInPost(
+      "owner-1",
+      "episode-linkedin",
+      savedPost,
+    );
+    assert.equal(episode.linkedInPost, savedPost);
+    assert.equal(requestMethod, "PATCH");
+    assert.match(requestUrl, /\/rest\/v1\/episodes/);
+    assert.match(requestUrl, /id=eq\.episode-linkedin/);
+    assert.match(requestUrl, /owner_id=eq\.owner-1/);
+    assert.equal(requestBody.linkedin_post, savedPost);
+    returnMissingEpisode = true;
+    await assert.rejects(
+      () => saveLinkedInPost("owner-1", "missing-episode", savedPost),
+      EpisodeNotFoundError,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSupabaseUrl === undefined) {
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    } else {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = originalSupabaseUrl;
+    }
+    if (originalServiceKey === undefined) {
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    } else {
+      process.env.SUPABASE_SERVICE_ROLE_KEY = originalServiceKey;
+    }
   }
 });
 

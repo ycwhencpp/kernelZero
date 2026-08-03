@@ -1,6 +1,13 @@
 import { authErrorResponse, currentOwner } from "../../../../../lib/auth";
-import { generateLinkedInPost } from "../../../../../lib/linkedin-post";
-import { getDashboardState } from "../../../../../lib/store";
+import {
+  generateLinkedInPost,
+  LINKEDIN_POST_MAX_CHARACTERS,
+} from "../../../../../lib/linkedin-post";
+import {
+  EpisodeNotFoundError,
+  getDashboardState,
+  saveLinkedInPost,
+} from "../../../../../lib/store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -30,8 +37,15 @@ export async function POST(
       title: episode.title,
       transcript,
     });
-    return Response.json(generated);
+    await saveLinkedInPost(ownerId, id, generated.post);
+    return Response.json({
+      ...generated,
+      state: await getDashboardState(ownerId),
+    });
   } catch (error) {
+    if (error instanceof EpisodeNotFoundError) {
+      return Response.json({ error: error.message }, { status: 404 });
+    }
     return (
       authErrorResponse(error) ??
       Response.json(
@@ -40,6 +54,61 @@ export async function POST(
             error instanceof Error
               ? error.message
               : "Unable to generate a LinkedIn post.",
+        },
+        { status: 500 },
+      )
+    );
+  }
+}
+
+export async function PATCH(
+  request: Request,
+  context: { params: Promise<{ id: string }> },
+) {
+  try {
+    const ownerId = await currentOwner("editor");
+    const { id } = await context.params;
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ error: "A LinkedIn post is required." }, { status: 400 });
+    }
+
+    const post =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>).post
+        : null;
+    if (typeof post !== "string" || !post.trim()) {
+      return Response.json({ error: "A LinkedIn post is required." }, { status: 400 });
+    }
+    const normalizedPost = post.trim();
+    if (normalizedPost.length > LINKEDIN_POST_MAX_CHARACTERS) {
+      return Response.json(
+        {
+          error: `LinkedIn posts must be no more than ${LINKEDIN_POST_MAX_CHARACTERS} characters.`,
+        },
+        { status: 400 },
+      );
+    }
+
+    await saveLinkedInPost(ownerId, id, normalizedPost);
+    return Response.json({
+      post: normalizedPost,
+      state: await getDashboardState(ownerId),
+    });
+  } catch (error) {
+    if (error instanceof EpisodeNotFoundError) {
+      return Response.json({ error: error.message }, { status: 404 });
+    }
+    return (
+      authErrorResponse(error) ??
+      Response.json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Unable to save the LinkedIn post.",
         },
         { status: 500 },
       )

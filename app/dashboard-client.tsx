@@ -531,12 +531,14 @@ export function DashboardClient({
       const payload = await requestJson<{
         post: string;
         provider: "openai" | "gemini" | "ollama";
+        state: DashboardState;
       }>(`/api/episodes/${encodeURIComponent(episodeId)}/linkedin-post`, {
         method: "POST",
       });
       if (!payload.post.trim()) {
         throw new Error("The generated LinkedIn post was empty. Please try again.");
       }
+      setState(payload.state);
       const providerLabel =
         payload.provider === "openai"
           ? "OpenAI"
@@ -550,6 +552,34 @@ export function DashboardClient({
         error instanceof Error
           ? error.message
           : "Unable to generate a LinkedIn post.",
+      );
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveLinkedInPost = async (
+    episodeId: string,
+    post: string,
+  ): Promise<string | null> => {
+    setBusy(`linkedin-save:${episodeId}`);
+    try {
+      const payload = await requestJson<{
+        post: string;
+        state: DashboardState;
+      }>(`/api/episodes/${encodeURIComponent(episodeId)}/linkedin-post`, {
+        method: "PATCH",
+        body: JSON.stringify({ post }),
+      });
+      setState(payload.state);
+      notify("LinkedIn post saved.");
+      return payload.post;
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Unable to save the LinkedIn post.",
       );
       return null;
     } finally {
@@ -816,6 +846,9 @@ export function DashboardClient({
             onEdit={(script) => void editEpisode(reviewEpisode.id, script)}
             onGenerateLinkedInPost={() =>
               generateLinkedInPost(reviewEpisode.id)
+            }
+            onSaveLinkedInPost={(post) =>
+              saveLinkedInPost(reviewEpisode.id, post)
             }
             onRegenerateAudio={() => void regenerateEpisodeAudio(reviewEpisode.id)}
             onExport={() => exportEpisode(reviewEpisode)}
