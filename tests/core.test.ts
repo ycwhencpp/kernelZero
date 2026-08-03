@@ -942,26 +942,39 @@ test("LinkedIn post output validation rejects malformed structured drafts", () =
   );
 });
 
-test("LinkedIn post output validation enforces five to seven unique hashtags", () => {
-  assert.throws(
-    () => normalizeLinkedInPost({ ...validLinkedInDraft, hashtags: ["#AI"] }),
-    /5-7 hashtags/i,
-  );
-  assert.throws(
-    () =>
-      normalizeLinkedInPost({
-        ...validLinkedInDraft,
-        hashtags: ["#AI", "#Backend", "#SystemDesign", "#Engineering", "AI"],
-      }),
-    /invalid.*hashtags/i,
-  );
-  assert.throws(
-    () =>
-      normalizeLinkedInPost({
-        ...validLinkedInDraft,
-        hashtags: ["#AI", "#ai", "#SystemDesign", "#Engineering", "#Backend"],
-      }),
-    /duplicate.*hashtags/i,
+test("LinkedIn post output validation treats hashtags as best-effort", () => {
+  const withoutHashtags = { ...validLinkedInDraft } as Record<string, unknown>;
+  delete withoutHashtags.hashtags;
+  assert.deepEqual(normalizeLinkedInPost(withoutHashtags), {
+    post: [
+      "Cache Me If You Can! 🏃‍♂️",
+      "A request should not redo expensive work every time.\n\nRead → Cache → Reuse → Respond",
+    ].join("\n\n"),
+  });
+  assert.deepEqual(
+    normalizeLinkedInPost({
+      ...validLinkedInDraft,
+      hashtags: [
+        "#AI",
+        "#ai",
+        "not-a-hashtag",
+        42,
+        "#Backend",
+        "#Systems",
+        "#Engineering",
+        "#Podcast",
+        "#Caching",
+        "#Performance",
+        "#IgnoredEighthTag",
+      ],
+    }),
+    {
+      post: [
+        "Cache Me If You Can! 🏃‍♂️",
+        "A request should not redo expensive work every time.\n\nRead → Cache → Reuse → Respond",
+        "#AI #Backend #Systems #Engineering #Podcast #Caching #Performance",
+      ].join("\n\n"),
+    },
   );
 });
 

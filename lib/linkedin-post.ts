@@ -2,7 +2,6 @@ import { resolveAiProvider, type AiProvider } from "./ai-config";
 
 export const LINKEDIN_POST_MAX_CHARACTERS = 3_000;
 
-const LINKEDIN_POST_MIN_HASHTAGS = 5;
 const LINKEDIN_POST_MAX_HASHTAGS = 7;
 
 export const LINKEDIN_POST_PROMPT = `
@@ -237,10 +236,7 @@ export function normalizeLinkedInPost(value: unknown): { post: string } {
 
   const record = value as Record<string, unknown>;
   const allowedKeys = new Set(["mode", "title", "body", "hashtags"]);
-  if (
-    Object.keys(record).length !== allowedKeys.size ||
-    Object.keys(record).some((key) => !allowedKeys.has(key))
-  ) {
+  if (Object.keys(record).some((key) => !allowedKeys.has(key))) {
     throw new Error("The AI returned an invalid LinkedIn post.");
   }
 
@@ -253,39 +249,30 @@ export function normalizeLinkedInPost(value: unknown): { post: string } {
   if (typeof record.title !== "string" || typeof record.body !== "string") {
     throw new Error("The AI returned an invalid LinkedIn post.");
   }
-  if (!Array.isArray(record.hashtags)) {
-    throw new Error("The AI returned invalid LinkedIn post hashtags.");
-  }
-
   const title = record.title.replace(/\r\n?/g, "\n").trim();
   const body = record.body.replace(/\r\n?/g, "\n").trim();
   if (!title || !body) throw new Error("The AI returned an empty LinkedIn post.");
 
-  if (
-    record.hashtags.length < LINKEDIN_POST_MIN_HASHTAGS ||
-    record.hashtags.length > LINKEDIN_POST_MAX_HASHTAGS
-  ) {
-    throw new Error(
-      `The AI returned a LinkedIn post without ${LINKEDIN_POST_MIN_HASHTAGS}-${LINKEDIN_POST_MAX_HASHTAGS} hashtags.`,
-    );
+  const hashtagCandidates = Array.isArray(record.hashtags)
+    ? record.hashtags
+    : typeof record.hashtags === "string"
+      ? record.hashtags.split(/\s+/)
+      : [];
+  const hashtags: string[] = [];
+  const seenHashtags = new Set<string>();
+  for (const candidate of hashtagCandidates) {
+    if (typeof candidate !== "string") continue;
+    const hashtag = candidate.trim();
+    const key = hashtag.toLowerCase();
+    if (!/^#[\p{L}\p{N}_]+$/u.test(hashtag) || seenHashtags.has(key)) {
+      continue;
+    }
+    seenHashtags.add(key);
+    hashtags.push(hashtag);
+    if (hashtags.length === LINKEDIN_POST_MAX_HASHTAGS) break;
   }
 
-  const hashtags = record.hashtags.map((hashtag) => {
-    if (typeof hashtag !== "string") {
-      throw new Error("The AI returned invalid LinkedIn post hashtags.");
-    }
-    const normalized = hashtag.trim();
-    if (!/^#[\p{L}\p{N}_]+$/u.test(normalized)) {
-      throw new Error("The AI returned invalid LinkedIn post hashtags.");
-    }
-    return normalized;
-  });
-  const uniqueHashtags = new Set(hashtags.map((hashtag) => hashtag.toLowerCase()));
-  if (uniqueHashtags.size !== hashtags.length) {
-    throw new Error("The AI returned duplicate LinkedIn post hashtags.");
-  }
-
-  const post = `${title}\n\n${body}\n\n${hashtags.join(" ")}`;
+  const post = [title, body, hashtags.join(" ")].filter(Boolean).join("\n\n");
   if (post.length > LINKEDIN_POST_MAX_CHARACTERS) {
     throw new Error(
       `The AI returned a LinkedIn post longer than ${LINKEDIN_POST_MAX_CHARACTERS} characters.`,
