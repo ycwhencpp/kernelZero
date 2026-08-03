@@ -9,6 +9,12 @@ export async function POST(request: Request) {
   try {
     const ownerId = await currentOwner("editor");
     const body = (await request.json()) as Partial<InterestProfile>;
+    if (body.id !== undefined) {
+      return Response.json(
+        { error: "Interest IDs are assigned by the server." },
+        { status: 400 },
+      );
+    }
     const name = body.name?.trim();
     const query = body.query?.trim();
     if (!name || !query) {
@@ -18,7 +24,7 @@ export async function POST(request: Request) {
       );
     }
     const interest: InterestProfile = {
-      id: body.id || `interest-${simpleHash(`${ownerId}|${name}`)}`,
+      id: `interest-${simpleHash(`${ownerId}|${name}`)}`,
       name,
       query,
       keywords: body.keywords?.filter(Boolean) ?? [],

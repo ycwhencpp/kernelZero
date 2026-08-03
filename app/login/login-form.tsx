@@ -45,20 +45,19 @@ export function LoginForm({
     }
 
     router.replace("/dashboard");
-    router.refresh();
   };
 
   return (
     <AuthShell
       title="Sign in to KernelZero"
-      intro="Use the account assigned to you by the workspace owner."
+      intro="Sign in to your private production workspace."
       footer={
         <>
           <p className="auth-switch">
             New to KernelZero? <Link href="/signup">Create an account</Link>
           </p>
           <p className="auth-access-note">
-            Access and roles are assigned by the workspace owner.
+            Your sources, drafts, settings, and production history stay in your workspace.
           </p>
         </>
       }

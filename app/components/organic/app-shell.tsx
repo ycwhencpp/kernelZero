@@ -7,6 +7,7 @@ export type OrganicView =
   | "dashboard"
   | "history"
   | "published"
+  | "explore"
   | "sources"
   | "settings"
   | "profile"
@@ -20,7 +21,8 @@ const navItems: Array<{
 }> = [
   { id: "dashboard", label: "Dashboard", icon: "/figma/nav-dashboard.svg" },
   { id: "history", label: "History", icon: "/figma/nav-history.svg" },
-  { id: "published", label: "Published", icon: "/figma/nav-published.svg" },
+  { id: "published", label: "My Published", icon: "/figma/nav-published.svg" },
+  { id: "explore", label: "Explore", icon: "/figma/nav-explore.svg" },
   { id: "sources", label: "Sources", icon: "/figma/nav-sources.svg" },
   { id: "settings", label: "Settings", icon: "/figma/nav-settings.svg" },
 ];

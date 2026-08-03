@@ -6,7 +6,7 @@ KernelZero is a personal research-intelligence and podcast studio. It discovers 
 
 - Five product workspaces: Discover, Daily Inbox, Library, Podcast Studio, and Tech Radar.
 - Durable Supabase Postgres data for interests, sources, content, collections, episodes, evidence, feedback, and job history.
-- Supabase Storage for generated MP3 files.
+- Private Supabase Storage for generated audio and validated profile pictures.
 - Live paper search across OpenAlex, Semantic Scholar, and arXiv.
 - User-approved RSS/Atom source verification and ingestion.
 - DOI/arXiv/URL/title deduplication and relevance/freshness/authority ranking.
@@ -14,8 +14,9 @@ KernelZero is a personal research-intelligence and podcast studio. It discovers 
 - Structured claim ledger plus a separate evidence-verification pass.
 - OpenAI Responses API, Gemini, and a local Ollama/macOS speech path.
 - Consent-backed local Chatterbox narrator voices: Ollama can write the script while Chatterbox narrates with the selected local reference voice.
-- Supabase email/password login with owner, editor, and viewer roles.
-- Review-before-publish approval restricted to the workspace owner.
+- Supabase email/password login with an isolated workspace for every account.
+- Review-before-publish approval restricted to each workspace owner.
+- An authenticated Explore directory for published podcasts and creator profiles.
 - Public `/feed.xml`, transcript routes, immutable episode GUIDs, and podcast artwork.
 - Signed daily scheduler endpoint with idempotent job history.
 
@@ -28,20 +29,26 @@ npm run dev
 ```
 
 Create a Supabase project and run every migration in `supabase/migrations/`
-(currently `0001_initial.sql` through `0007_auth_roles_and_rls.sql`). Enable the
+(currently `0001_initial.sql` through `0008_user_workspace_isolation.sql`). Enable the
 Email provider in **Authentication → Providers**, then add
 `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and the
 server-only `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`. Older Supabase projects
 can use `NEXT_PUBLIC_SUPABASE_ANON_KEY` in place of the publishable key. The
-migrations create the required `podcast-media` bucket, authenticated
-workspace-scoped RLS policies, and role helpers.
+migrations create the required private `podcast-media` bucket, authenticated
+workspace-scoped RLS policies, and per-user ownership constraints. Published
+audio is streamed through the application media route.
 
-Set `APP_OWNER_EMAIL` to the email that owns the workspace and create that user
-in **Authentication → Users**. Other accounts begin as viewers. After a member
-has signed in once, an owner can assign their role in the SQL editor or via the
-authenticated `set_workspace_member_role(email, 'editor' | 'viewer')` RPC.
-Editors can create and edit briefings; viewers are read-only; only owners can
-publish, change production settings, or delete workspace data.
+For an existing deployment, apply `0008_user_workspace_isolation.sql` before
+deploying this application version. It changes deterministic workspace keys to
+owner-scoped keys, makes podcast media private, and adds the published-directory
+index and citation count used by Explore.
+
+Every verified account owns a separate workspace. Sources, interests, drafts,
+settings, voices, and production history are scoped to that account. Published
+audio can appear in the authenticated Explore directory, but private workspace
+records are never loaded from another account. Profile pictures are uploaded as
+validated JPEG, PNG, or WebP files and served through short-lived signed URLs;
+arbitrary remote image URLs are not accepted.
 
 Install Ollama plus FFmpeg, pull a model such as `qwen2.5:14b`, and set `AI_PROVIDER=ollama` (or leave `AI_PROVIDER=auto`; it falls back to Ollama when cloud keys are absent). KernelZero uses the local model for structured writing and verification, then macOS speech synthesis for MP3 audio when no custom local voice is configured. Provider calls are server-only; no static demo records are inserted into the database.
 
@@ -79,18 +86,18 @@ Production variables:
 
 - `GEMINI_API_KEY` or `OPENAI_API_KEY` (one is enough; optional `AI_PROVIDER=gemini|openai|ollama|auto`)
 - `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_CONTEXT_SIZE`, `OLLAMA_PARALLELISM`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_LOG_TIMINGS`, `OLLAMA_FIRST_TOKEN_TIMEOUT_MS`, `OLLAMA_IDLE_TIMEOUT_MS`, `LOCAL_TTS_VOICE`, `LOCAL_TTS_RATE` (optional local Ollama/macOS speech settings)
-- `CHATTERBOX_PYTHON`, `CHATTERBOX_DEVICE`, `CHATTERBOX_CACHE_DIR`, `CHATTERBOX_MAX_TEMPO_ADJUSTMENT`, `LOCAL_VOICE_STORAGE_DIR` (optional local Chatterbox settings)
+- `CHATTERBOX_PYTHON`, `CHATTERBOX_DEVICE`, `CHATTERBOX_CACHE_DIR`, `CHATTERBOX_MAX_TEMPO_ADJUSTMENT`, `CHATTERBOX_MIN_WPM`, `CHATTERBOX_MAX_WPM`, `LOCAL_VOICE_STORAGE_DIR` (optional local Chatterbox settings; out-of-range chunks are retried, then the fastest clear candidate inside a bounded slow-rate tolerance may be retained; fast chunks still fail)
 - `REQUIRE_LOCAL_VOICE=true` to prevent a cron or manual generation from silently falling back to the system voice when no local narrator is configured
 - `GEMINI_TEXT_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_TTS_VOICE` (optional Gemini overrides)
 - `OPENAI_API_KEY` and OpenAI model overrides (if using OpenAI)
 - `PODCAST_BASE_URL`
 - `PODCAST_EMAIL` (use a dedicated public creator address)
 - `CRON_SECRET`
-- `CRON_OWNER_EMAIL`
+- `CRON_OWNER_EMAIL` (the verified account must sign in once before the cron runs)
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (or legacy `NEXT_PUBLIC_SUPABASE_ANON_KEY`)
 - `SUPABASE_SERVICE_ROLE_KEY` (server-only; never expose this in the browser)
-- `APP_OWNER_EMAIL` and `REQUIRE_AUTH=true`
+- `REQUIRE_AUTH=true`
 - Optional model, voice, title, description, budget, and authentication overrides listed in `.env.example`
 
 ## Daily automation (Vercel)

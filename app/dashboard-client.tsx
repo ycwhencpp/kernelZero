@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import type { AppUser, DashboardState, Episode, EpisodeLength, WorkspaceSettings } from "../lib/types";
 import {
   OrganicAppShell,
@@ -48,8 +47,9 @@ function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
 
 const pageTitles: Record<OrganicView, string> = {
   dashboard: "Overview",
+  explore: "Explore Podcasts",
   history: "Run History",
-  published: "Published Episodes",
+  published: "My Published Episodes",
   sources: "Manage Sources",
   settings: "Settings",
   profile: "Account Settings",
@@ -67,6 +67,46 @@ const viewRoutes: Partial<Record<OrganicView, string>> = {
   create: "/create",
 };
 
+function pushClientRoute(route: string) {
+  const currentRoute = `${window.location.pathname}${window.location.search}`;
+  if (currentRoute !== route) {
+    window.history.pushState(null, "", route);
+  }
+}
+
+function clientRouteFromUrl(url: URL): {
+  view: OrganicView;
+  episodeId?: string;
+  reviewReturnView?: OrganicView;
+} | null {
+  const pathname =
+    url.pathname.length > 1
+      ? url.pathname.replace(/\/+$/, "")
+      : url.pathname;
+  const viewEntry = Object.entries(viewRoutes).find(
+    ([, route]) => route === pathname,
+  );
+  if (viewEntry) {
+    return { view: viewEntry[0] as OrganicView };
+  }
+
+  const reviewMatch = pathname.match(/^\/review\/([^/]+)$/);
+  if (!reviewMatch) return null;
+
+  let episodeId: string;
+  try {
+    episodeId = decodeURIComponent(reviewMatch[1]);
+  } catch {
+    return null;
+  }
+  if (!episodeId) return null;
+
+  const from = url.searchParams.get("from");
+  const reviewReturnView: OrganicView =
+    from === "history" || from === "published" ? from : "dashboard";
+  return { view: "review", episodeId, reviewReturnView };
+}
+
 export function DashboardClient({
   initialState,
   user: initialUser,
@@ -80,7 +120,6 @@ export function DashboardClient({
   initialEpisodeId?: string | null;
   initialReviewReturnView?: OrganicView;
 }) {
-  const router = useRouter();
   const [state, setState] = useState(initialState);
   const [user, setUser] = useState(initialUser);
   const [view, setView] = useState<OrganicView>(initialView);
@@ -141,6 +180,10 @@ export function DashboardClient({
   }, []);
 
   const navigate = (next: OrganicView) => {
+    if (next === "explore") {
+      window.location.assign("/explore");
+      return;
+    }
     if (next === "create" && !canEdit) {
       notify("Your viewer role has read-only workspace access.");
       return;
@@ -151,7 +194,7 @@ export function DashboardClient({
     }
     setView(next);
     const route = viewRoutes[next];
-    if (route) router.push(route);
+    if (route) pushClientRoute(route);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
@@ -171,7 +214,7 @@ export function DashboardClient({
         : returnView;
     setReviewReturnView(nextReturnView);
     setView("review");
-    router.push(
+    pushClientRoute(
       `/review/${encodeURIComponent(episode.id)}?from=${encodeURIComponent(nextReturnView)}`,
     );
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -220,7 +263,7 @@ export function DashboardClient({
       setPlaybackDuration(0);
       setAudioStatus(generated.episode.audioUrl ? "loading" : "missing");
       setView("review");
-      router.push(
+      pushClientRoute(
         `/review/${encodeURIComponent(generated.episode.id)}?from=dashboard`,
       );
       if (generated.episode.audioUrl) loadEpisodeAudio(generated.episode);
@@ -245,7 +288,7 @@ export function DashboardClient({
       );
       setState(payload.state);
       setView("published");
-      router.push("/published");
+      pushClientRoute("/published");
       notify("Episode approved and queued for the public feed.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Approval failed.");
@@ -351,6 +394,53 @@ export function DashboardClient({
     }
     return audio;
   };
+  const loadEpisodeAudioRef = useRef(loadEpisodeAudio);
+  useEffect(() => {
+    loadEpisodeAudioRef.current = loadEpisodeAudio;
+  });
+
+  useEffect(() => {
+    const syncViewFromHistory = () => {
+      const route = clientRouteFromUrl(new URL(window.location.href));
+      if (!route) return;
+
+      const audio = audioRef.current;
+      audio?.pause();
+      pendingSeekRef.current = null;
+      setPlayingId(null);
+      updatePlaybackPosition(0);
+      setPlaybackDuration(0);
+
+      if (route.view === "review" && route.episodeId) {
+        const episode = state.episodes.find(
+          (candidate) => candidate.id === route.episodeId,
+        );
+        if (!episode) {
+          setSelectedEpisodeId(null);
+          setAudioStatus("missing");
+          setView("history");
+          window.history.replaceState(null, "", "/history");
+          window.scrollTo({ top: 0 });
+          return;
+        }
+        setSelectedEpisodeId(route.episodeId);
+        setReviewReturnView(route.reviewReturnView ?? "dashboard");
+        setAudioStatus(episode.audioUrl ? "loading" : "missing");
+        if (audio) {
+          audio.removeAttribute("src");
+          delete audio.dataset.episodeId;
+          audio.load();
+        }
+        if (episode.audioUrl) loadEpisodeAudioRef.current(episode);
+      }
+
+      setView(route.view);
+      window.scrollTo({ top: 0 });
+    };
+
+    window.addEventListener("popstate", syncViewFromHistory);
+    return () => window.removeEventListener("popstate", syncViewFromHistory);
+  }, [state.episodes]);
 
   const previewEpisode = (episode: Episode) => {
     if (!episode.audioUrl) {
@@ -518,7 +608,7 @@ export function DashboardClient({
       const payload = await requestJson<{ state: DashboardState }>("/api/workspace", { method: "DELETE" });
       setState(payload.state);
       setView("dashboard");
-      router.push("/dashboard");
+      pushClientRoute("/dashboard");
       notify("Workspace data deleted.");
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to delete workspace.");

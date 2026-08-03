@@ -87,7 +87,9 @@ function deliveryForText(text: string): {
   }
   if (UPBEAT_CONTEXT.test(text)) return { tag: "[happy]", somber: false };
   if (DRAMATIC_CONTEXT.test(text)) {
-    return { tag: "[dramatic]", somber: false };
+    // The KernelZero delivery contract is curious and restrained rather than
+    // dramatic. Slow down around danger instead of adding a theatrical tag.
+    return { tag: null, somber: true };
   }
   return { tag: null, somber: false };
 }

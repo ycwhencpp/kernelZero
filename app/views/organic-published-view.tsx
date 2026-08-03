@@ -11,12 +11,7 @@ export function OrganicPublishedView({ episodes, canCreate, onNewBriefing, onRev
   const [page, setPage] = useState(0);
   const [now] = useState(() => Date.now());
   const published = useMemo(
-    () =>
-      episodes.filter(
-        (e) =>
-          e.status === "published" ||
-          e.status === "approved",
-      ),
+    () => episodes.filter((episode) => episode.status === "published"),
     [episodes],
   );
   const filtered = useMemo(() => {
@@ -38,7 +33,7 @@ export function OrganicPublishedView({ episodes, canCreate, onNewBriefing, onRev
       <div className="organic-published-head">
         <div>
           <h2 className="organic-page-title inline">
-            Published Episodes <span className="organic-archive-badge">ARCHIVE</span>
+            My Published Episodes <span className="organic-archive-badge">PRIVATE WORKSPACE</span>
           </h2>
         </div>
         {canCreate && (

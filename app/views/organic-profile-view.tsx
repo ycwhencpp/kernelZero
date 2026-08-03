@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { MAX_AVATAR_BYTES } from "../../lib/profile-avatar";
 import type { AppUser } from "../../lib/types";
 import { getSupabaseBrowser } from "../../lib/supabase-browser";
 
@@ -15,12 +16,30 @@ export function OrganicProfileView({
 }) {
   const [editing, setEditing] = useState(false);
   const [displayName, setDisplayName] = useState(user.displayName);
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarPreviewUrl, setAvatarPreviewUrl] = useState<string | null>(null);
+  const [removeAvatar, setRemoveAvatar] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [notifications, setNotifications] = useState(true);
   const [theme, setTheme] = useState<"light" | "dark" | "system">("light");
   const [busy, setBusy] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(
+    () => () => {
+      if (avatarPreviewUrl) URL.revokeObjectURL(avatarPreviewUrl);
+    },
+    [avatarPreviewUrl],
+  );
+
+  const clearAvatarDraft = () => {
+    setAvatarFile(null);
+    setAvatarPreviewUrl(null);
+    setRemoveAvatar(false);
+    if (avatarInputRef.current) avatarInputRef.current.value = "";
+  };
 
   const saveProfile = async () => {
     if (displayName.trim().length < 2) {
@@ -41,7 +60,39 @@ export function OrganicProfileView({
       if (!response.ok || !payload.user) {
         throw new Error(payload.error || "Unable to update profile.");
       }
-      onUserUpdate(payload.user);
+      let updatedUser = payload.user;
+
+      if (avatarFile) {
+        const avatarForm = new FormData();
+        avatarForm.set("avatar", avatarFile);
+        const avatarResponse = await fetch("/api/profile/avatar", {
+          method: "POST",
+          body: avatarForm,
+        });
+        const avatarPayload = (await avatarResponse.json().catch(() => ({}))) as {
+          user?: AppUser;
+          error?: string;
+        };
+        if (!avatarResponse.ok || !avatarPayload.user) {
+          throw new Error(avatarPayload.error || "Unable to upload profile picture.");
+        }
+        updatedUser = avatarPayload.user;
+      } else if (removeAvatar) {
+        const avatarResponse = await fetch("/api/profile/avatar", {
+          method: "DELETE",
+        });
+        const avatarPayload = (await avatarResponse.json().catch(() => ({}))) as {
+          user?: AppUser;
+          error?: string;
+        };
+        if (!avatarResponse.ok || !avatarPayload.user) {
+          throw new Error(avatarPayload.error || "Unable to remove profile picture.");
+        }
+        updatedUser = avatarPayload.user;
+      }
+
+      onUserUpdate(updatedUser);
+      clearAvatarDraft();
       setEditing(false);
       onNotify("Profile updated.");
     } catch (error) {
@@ -49,6 +100,33 @@ export function OrganicProfileView({
     } finally {
       setBusy(false);
     }
+  };
+
+  const chooseAvatar = (file: File | null) => {
+    if (!file) return;
+    if (file.size > MAX_AVATAR_BYTES) {
+      onNotify("Profile pictures must be 3 MB or smaller.");
+      if (avatarInputRef.current) avatarInputRef.current.value = "";
+      return;
+    }
+    if (
+      file.type &&
+      !["image/jpeg", "image/png", "image/webp"].includes(file.type)
+    ) {
+      onNotify("Choose a JPEG, PNG, or WebP image.");
+      if (avatarInputRef.current) avatarInputRef.current.value = "";
+      return;
+    }
+    setAvatarFile(file);
+    setAvatarPreviewUrl(URL.createObjectURL(file));
+    setRemoveAvatar(false);
+  };
+
+  const markAvatarForRemoval = () => {
+    setAvatarFile(null);
+    setAvatarPreviewUrl(null);
+    setRemoveAvatar(Boolean(user.avatarUrl));
+    if (avatarInputRef.current) avatarInputRef.current.value = "";
   };
 
   const updatePassword = async () => {
@@ -80,10 +158,13 @@ export function OrganicProfileView({
 
   const roleCopy =
     user.role === "owner"
-      ? "Full workspace control, including publishing and member roles."
+      ? "Full control of this private workspace, including publishing."
       : user.role === "editor"
         ? "Can create, generate, and edit briefings. Publishing stays with the owner."
         : "Read-only access to workspace research, history, and published episodes.";
+  const displayedAvatarUrl = editing
+    ? avatarPreviewUrl || (removeAvatar ? null : user.avatarUrl)
+    : user.avatarUrl;
 
   return (
     <div className="organic-profile-page">
@@ -93,6 +174,12 @@ export function OrganicProfileView({
           <p>From signal to insight.</p>
         </div>
         <div className="organic-profile-header-actions">
+          <a
+            className="organic-text-link"
+            href={`/creators/${encodeURIComponent(user.workspaceOwnerId)}`}
+          >
+            View public profile
+          </a>
           <span className={`organic-role-badge role-${user.role}`}>
             {user.role.toUpperCase()}
           </span>
@@ -107,8 +194,8 @@ export function OrganicProfileView({
       <section className="organic-profile-card">
         <div className="organic-profile-avatar">
           <img
-            src={user.avatarUrl || "/user-placeholder.svg"}
-            alt="User profile placeholder"
+            src={displayedAvatarUrl || "/user-placeholder.svg"}
+            alt={`${user.displayName} profile`}
           />
           <button
             type="button"
@@ -139,6 +226,38 @@ export function OrganicProfileView({
             <p>{user.email}</p>
           </div>
           <div>
+            <span>Profile Picture</span>
+            {editing ? (
+              <div className="organic-avatar-upload">
+                <input
+                  ref={avatarInputRef}
+                  className="organic-input"
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  disabled={busy}
+                  onChange={(event) =>
+                    chooseAvatar(event.currentTarget.files?.[0] ?? null)
+                  }
+                />
+                <small>JPEG, PNG, or WebP. Maximum 3 MB.</small>
+                {avatarFile ? <small>Selected: {avatarFile.name}</small> : null}
+                {(user.avatarUrl || avatarFile) && !removeAvatar ? (
+                  <button
+                    type="button"
+                    className="organic-text-link"
+                    disabled={busy}
+                    onClick={markAvatarForRemoval}
+                  >
+                    Remove picture
+                  </button>
+                ) : null}
+                {removeAvatar ? <small>Picture will be removed when saved.</small> : null}
+              </div>
+            ) : (
+              <p>{user.avatarUrl ? "Custom picture" : "Default picture"}</p>
+            )}
+          </div>
+          <div>
             <span>Production Role</span>
             <p className="organic-profile-role">
               <i>{user.role.toUpperCase()}</i>
@@ -160,7 +279,7 @@ export function OrganicProfileView({
                 disabled={busy}
                 onClick={() => void saveProfile()}
               >
-                Save profile
+                {busy ? "Saving…" : "Save profile"}
               </button>
               <button
                 type="button"
@@ -168,6 +287,7 @@ export function OrganicProfileView({
                 disabled={busy}
                 onClick={() => {
                   setDisplayName(user.displayName);
+                  clearAvatarDraft();
                   setEditing(false);
                 }}
               >
