@@ -17,6 +17,12 @@ import {
 } from "./podcast-style";
 import type { ContentItem, Episode, EpisodeLength } from "./types";
 import { parseModelJson } from "./model-json";
+import {
+  LINKEDIN_POST_SYSTEM_PROMPT,
+  linkedinPostPrompt,
+  linkedinPostSchema,
+  type LinkedInPostDraft,
+} from "./linkedin-post";
 
 function geminiKey(): string {
   const key = process.env.GEMINI_API_KEY;
@@ -86,6 +92,28 @@ async function generateContent(
     throw new Error(`Gemini API returned ${response.status}: ${detail}`);
   }
   return (await response.json()) as Record<string, unknown>;
+}
+
+export async function createLinkedInPost(
+  title: string,
+  transcript: string,
+): Promise<LinkedInPostDraft> {
+  const payload = await generateContent(textModel(false), {
+    systemInstruction: {
+      parts: [{ text: LINKEDIN_POST_SYSTEM_PROMPT }],
+    },
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: linkedinPostPrompt(title, transcript) }],
+      },
+    ],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseJsonSchema: linkedinPostSchema(),
+    },
+  });
+  return parseModelJson<LinkedInPostDraft>(extractText(payload));
 }
 
 const systemPrompt = withPodcastHostStyle(

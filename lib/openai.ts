@@ -35,6 +35,12 @@ import {
 import type { Citation, ContentItem, Episode, EpisodeLength, EvidenceClaim } from "./types";
 import type { ActiveVoiceProfile } from "./store";
 import { parseModelJson } from "./model-json";
+import {
+  LINKEDIN_POST_SYSTEM_PROMPT,
+  linkedinPostPrompt,
+  linkedinPostSchema,
+  type LinkedInPostDraft,
+} from "./linkedin-post";
 
 export { chunkForSpeech };
 
@@ -70,6 +76,54 @@ function extractResponseText(payload: Record<string, unknown>): string {
     }
   }
   return fragments.join("\n");
+}
+
+export async function createLinkedInPost(
+  title: string,
+  transcript: string,
+): Promise<LinkedInPostDraft> {
+  const env = runtimeEnv();
+  if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
+
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: env.OPENAI_TEXT_MODEL_FAST || "gpt-5.6-luna",
+      reasoning: { effort: "low" },
+      input: [
+        {
+          role: "system",
+          content: [{ type: "input_text", text: LINKEDIN_POST_SYSTEM_PROMPT }],
+        },
+        {
+          role: "user",
+          content: [{ type: "input_text", text: linkedinPostPrompt(title, transcript) }],
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "linkedin_post",
+          strict: true,
+          schema: linkedinPostSchema(),
+        },
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 400);
+    throw new Error(
+      `OpenAI LinkedIn post API returned ${response.status}${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  return parseModelJson<LinkedInPostDraft>(
+    extractResponseText((await response.json()) as Record<string, unknown>),
+  );
 }
 
 async function createStructuredPodcast(

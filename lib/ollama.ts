@@ -23,6 +23,12 @@ import { withPodcastHostStyle } from "./podcast-style";
 import { splitNarrationSentences } from "./sentence-segmentation";
 import { removeRepeatedSentencesAgainstReference } from "./script-repetition";
 import type { ContentItem, Episode, EpisodeLength } from "./types";
+import {
+  LINKEDIN_POST_SYSTEM_PROMPT,
+  linkedinPostPrompt,
+  linkedinPostSchema,
+  type LinkedInPostDraft,
+} from "./linkedin-post";
 
 const execFileAsync = promisify(execFile);
 
@@ -318,6 +324,24 @@ async function chat(
       maxOutputTokens: retryTokens,
     });
   }
+}
+
+export async function createLinkedInPost(
+  title: string,
+  transcript: string,
+): Promise<LinkedInPostDraft> {
+  const content = await chat(
+    [
+      { role: "system", content: LINKEDIN_POST_SYSTEM_PROMPT },
+      { role: "user", content: linkedinPostPrompt(title, transcript) },
+    ],
+    {
+      format: linkedinPostSchema(),
+      maxOutputTokens: 1_024,
+      stage: "the LinkedIn post",
+    },
+  );
+  return parseModelJson<LinkedInPostDraft>(content);
 }
 
 const sectionPlans = [

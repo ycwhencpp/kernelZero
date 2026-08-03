@@ -433,6 +433,40 @@ export function DashboardClient({
     notify("Transcript saved.");
   };
 
+  const generateLinkedInPost = async (
+    episodeId: string,
+  ): Promise<string | null> => {
+    setBusy(`linkedin:${episodeId}`);
+    try {
+      const payload = await requestJson<{
+        post: string;
+        provider: "openai" | "gemini" | "ollama";
+      }>(`/api/episodes/${encodeURIComponent(episodeId)}/linkedin-post`, {
+        method: "POST",
+      });
+      if (!payload.post.trim()) {
+        throw new Error("The generated LinkedIn post was empty. Please try again.");
+      }
+      const providerLabel =
+        payload.provider === "openai"
+          ? "OpenAI"
+          : payload.provider === "gemini"
+            ? "Gemini"
+            : "Ollama";
+      notify(`LinkedIn post generated with ${providerLabel}.`);
+      return payload.post;
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Unable to generate a LinkedIn post.",
+      );
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const regenerateEpisodeAudio = async (episodeId: string) => {
     const hadAudio = Boolean(
       state.episodes.find((episode) => episode.id === episodeId)?.audioUrl,
@@ -690,8 +724,12 @@ export function DashboardClient({
             onSeekTo={(seconds) => seekEpisodeTo(reviewEpisode, seconds)}
             onPlaybackRateChange={changePlaybackRate}
             onEdit={(script) => void editEpisode(reviewEpisode.id, script)}
+            onGenerateLinkedInPost={() =>
+              generateLinkedInPost(reviewEpisode.id)
+            }
             onRegenerateAudio={() => void regenerateEpisodeAudio(reviewEpisode.id)}
             onExport={() => exportEpisode(reviewEpisode)}
+            onNotify={notify}
             busy={busy}
           />
         )}
