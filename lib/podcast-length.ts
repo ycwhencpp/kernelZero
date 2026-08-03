@@ -6,9 +6,11 @@ export type EpisodeLengthProfile = {
   maxWords: number;
 };
 
-// Spoken narration averages roughly 150 words per minute. Keep a narrow
-// tolerance so the selected duration is a real generation contract, not a
-// suggestion that a model can satisfy with an intro-sized response.
+export const EPISODE_LENGTH_SOFT_TOLERANCE_WORDS = 100;
+
+// Spoken narration averages roughly 150 words per minute. These are the target
+// bands; validation adds the small absolute buffer above so near misses do not
+// fail an otherwise complete episode.
 const profiles: Record<EpisodeLength, EpisodeLengthProfile> = {
   brief: {
     minutes: 3,
@@ -44,10 +46,23 @@ export function countScriptWords(script: string): number {
   return script.trim() ? script.trim().split(/\s+/).length : 0;
 }
 
+export function episodeLengthAcceptanceRange(
+  length: EpisodeLength,
+): { minWords: number; maxWords: number } {
+  const profile = profiles[length];
+  return {
+    minWords: Math.max(
+      1,
+      profile.minWords - EPISODE_LENGTH_SOFT_TOLERANCE_WORDS,
+    ),
+    maxWords: profile.maxWords + EPISODE_LENGTH_SOFT_TOLERANCE_WORDS,
+  };
+}
+
 export function scriptMatchesEpisodeLength(script: string, length: EpisodeLength): boolean {
   const words = countScriptWords(script);
-  const profile = profiles[length];
-  return words >= profile.minWords && words <= profile.maxWords;
+  const accepted = episodeLengthAcceptanceRange(length);
+  return words >= accepted.minWords && words <= accepted.maxWords;
 }
 
 export function episodeLengthInstruction(
@@ -55,7 +70,8 @@ export function episodeLengthInstruction(
   length: EpisodeLength,
 ): string {
   const profile = profiles[length];
-  return `Create a complete ${profile.minutes}-minute ${type.replaceAll("_", " ")}. The spoken script must contain ${profile.minWords.toLocaleString("en-US")}–${profile.maxWords.toLocaleString("en-US")} words. This word range is mandatory. Cover the full requested arc and end with a complete conclusion; never return only an introduction or an unfinished sentence.`;
+  const accepted = episodeLengthAcceptanceRange(length);
+  return `Create a complete ${profile.minutes}-minute ${type.replaceAll("_", " ")}. Target ${profile.minWords.toLocaleString("en-US")}–${profile.maxWords.toLocaleString("en-US")} spoken words. A soft deviation of up to ${EPISODE_LENGTH_SOFT_TOLERANCE_WORDS} words is allowed only when needed, so the final accepted range is ${accepted.minWords.toLocaleString("en-US")}–${accepted.maxWords.toLocaleString("en-US")} words. Aim for the target range rather than the tolerance boundary. Cover the full requested arc and end with a complete conclusion; never return only an introduction or an unfinished sentence.`;
 }
 
 export function estimateScriptDurationSeconds(script: string): number {

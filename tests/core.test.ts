@@ -9,6 +9,7 @@ import {
   hasBudgetForGeneration,
   scoreCandidate,
   selectDigestItems,
+  selectTopItemPerSource,
 } from "../lib/domain.ts";
 import {
   aiProviderLabel,
@@ -21,9 +22,24 @@ import {
   prepareForChatterbox,
   prepareForMacSpeech,
 } from "../lib/narration-text.ts";
+import {
+  CHATTERBOX_TARGET_WORDS_PER_MINUTE,
+  CHATTERBOX_MAX_TEMPO_ADJUSTMENT,
+  CHATTERBOX_MIN_WORDS_PER_MINUTE,
+  CHATTERBOX_MAX_WORDS_PER_MINUTE,
+  CHATTERBOX_TTS_DELIVERY_PROMPT,
+  chatterboxMaxTempoAdjustment,
+  chatterboxTargetDurationSeconds,
+  chatterboxWordsPerMinuteRange,
+} from "../lib/chatterbox-delivery.ts";
 import { parseModelJson } from "../lib/model-json.ts";
 import { parseMediaByteRange } from "../lib/media-range.ts";
+import { mediaKeyFromRoute, mediaUrl } from "../lib/media-path.ts";
 import { clampPlaybackSeconds } from "../lib/playback.ts";
+import {
+  createAvatarUrl,
+  safeAvatarUrl,
+} from "../lib/profile-avatar.ts";
 import {
   hasUsableAudioUrl,
   reconcileGeneratedEpisode,
@@ -31,15 +47,18 @@ import {
 } from "../lib/generated-episode.ts";
 import {
   createStructuredPodcast as createOllamaPodcast,
+  hasDanglingNarrationEnding,
   isActionableEvidenceIssue,
   isActionableRepetitionIssue,
   mapWithConcurrency,
   normalizePodcastPlan,
   planSectionExpansions,
+  trimNarrationToCompleteSentences,
 } from "../lib/ollama.ts";
 import { chunkForSpeech, generatePodcast } from "../lib/openai.ts";
 import {
   countScriptWords,
+  episodeLengthAcceptanceRange,
   episodeLengthInstruction,
   estimateScriptDurationSeconds,
   scriptMatchesEpisodeLength,
@@ -53,8 +72,10 @@ import {
   openAiSpeechModelSupportsInstructions,
   PODCAST_AUDIO_DELIVERY_INSTRUCTION,
   PODCAST_HOST_STYLE_INSTRUCTION,
+  removeAiProductionDisclosures,
   withPodcastHostStyle,
 } from "../lib/podcast-style.ts";
+import { KERNELZERO_TRANSCRIPT_SECTION_PROMPT } from "../lib/kernelzero-transcript-prompt.ts";
 import { normalizeEvidenceConfidence } from "../lib/podcast-schema.ts";
 import { podcastSourcePacket } from "../lib/podcast-source.ts";
 import { parseFeed } from "../lib/rss.ts";
@@ -142,6 +163,38 @@ test("parses media byte ranges used for audio seeking", () => {
   assert.equal(parseMediaByteRange("bytes=0-10,20-30", 1_000), null);
 });
 
+test("media URLs preserve storage-key path segments", () => {
+  const key = "audio/anurag jay/example episode.mp3";
+  assert.equal(
+    mediaUrl(key),
+    "/api/media/audio/anurag%20jay/example%20episode.mp3",
+  );
+  assert.equal(
+    mediaKeyFromRoute(["audio", "anurag jay", "example episode.mp3"]),
+    key,
+  );
+  assert.equal(
+    mediaKeyFromRoute("audio%2Fanurag%20jay%2Fexample%20episode.mp3"),
+    key,
+  );
+  assert.equal(mediaKeyFromRoute("%not-valid"), null);
+});
+
+test("profile avatars accept only the authenticated app-relative route", () => {
+  const userId = "123e4567-e89b-12d3-a456-426614174000";
+  const avatarUrl = createAvatarUrl(userId, 42);
+  assert.equal(safeAvatarUrl(avatarUrl, userId), avatarUrl);
+  assert.equal(safeAvatarUrl("https://tracker.example/pixel.png", userId), null);
+  assert.equal(safeAvatarUrl("//tracker.example/pixel.png", userId), null);
+  assert.equal(
+    safeAvatarUrl(
+      "/api/avatars/123e4567-e89b-12d3-a456-426614174999?v=42",
+      userId,
+    ),
+    null,
+  );
+});
+
 test("playback positions stay within the encoded duration", () => {
   assert.equal(clampPlaybackSeconds(-10, 100), 0);
   assert.equal(clampPlaybackSeconds(140, 100), 100);
@@ -198,6 +251,26 @@ test("digest selection limits repeated sources and topics", () => {
   ];
   const selected = selectDigestItems(candidates, 4);
   assert.deepEqual(selected.map((candidate) => candidate.id), ["a", "b", "d"]);
+});
+
+test("source selection contributes only the highest-ranked item from each source", () => {
+  const candidates = [
+    item({ id: "one-low", sourceId: "source-one", score: 70 }),
+    item({ id: "one-high", sourceId: "source-one", score: 95 }),
+    item({ id: "two-old", sourceId: "source-two", score: 90, publishedAt: "2026-07-01T00:00:00Z" }),
+    item({ id: "two-new", sourceId: "source-two", score: 90, publishedAt: "2026-07-28T00:00:00Z" }),
+    item({ id: "not-selected", sourceId: "source-three", score: 100 }),
+  ];
+
+  const selected = selectTopItemPerSource(candidates, [
+    "source-two",
+    "source-one",
+  ]);
+
+  assert.deepEqual(selected.map((candidate) => candidate.id), [
+    "two-new",
+    "one-high",
+  ]);
 });
 
 test("parses RSS items without retaining markup", () => {
@@ -264,10 +337,25 @@ test("sentence processing preserves decimal values and model versions", () => {
 test("standard episode length is enforced as a complete nine-minute script", () => {
   const instruction = episodeLengthInstruction("daily_digest", "standard");
   const validScript = Array.from({ length: 1_350 }, () => "word").join(" ");
+  const slightlyShortScript = Array.from(
+    { length: 1_183 },
+    () => "word",
+  ).join(" ");
+  const tooShortScript = Array.from({ length: 1_114 }, () => "word").join(" ");
   assert.match(instruction, /9-minute/);
-  assert.match(instruction, /1,215–1,485 words/);
+  assert.match(instruction, /Target 1,215–1,485 spoken words/);
+  assert.match(instruction, /soft deviation of up to 100 words/);
+  assert.deepEqual(episodeLengthAcceptanceRange("standard"), {
+    minWords: 1_115,
+    maxWords: 1_585,
+  });
   assert.equal(countScriptWords(validScript), 1_350);
   assert.equal(scriptMatchesEpisodeLength(validScript, "standard"), true);
+  assert.equal(
+    scriptMatchesEpisodeLength(slightlyShortScript, "standard"),
+    true,
+  );
+  assert.equal(scriptMatchesEpisodeLength(tooShortScript, "standard"), false);
   assert.equal(estimateScriptDurationSeconds(validScript), 540);
   assert.equal(scriptMatchesEpisodeLength("Only an introduction.", "standard"), false);
 });
@@ -527,7 +615,7 @@ test("generation response keeps returned audio when refreshed state is stale", (
   };
   const returnedEpisode: Episode = {
     ...staleEpisode,
-    audioUrl: "/api/media/episodes%2Fepisode-regenerated.mp3",
+    audioUrl: "/api/media/episodes/episode-regenerated.mp3",
     audioKey: "episodes/episode-regenerated.mp3",
     audioBytes: 7_809_452,
   };
@@ -584,6 +672,67 @@ test("Chatterbox performance plans use native cues and contextual pauses", () =>
     negated.map((segment) => segment.text).join(" "),
     /\[(?:happy|surprised)\]/,
   );
+  const restrained = prepareChatterboxSegments(
+    "The attack succeeded at a critical turning point.",
+  );
+  assert.doesNotMatch(
+    restrained.map((segment) => segment.text).join(" "),
+    /\[dramatic\]/,
+  );
+  assert.ok(restrained[0].pauseAfterMs > 580);
+});
+
+test("Chatterbox uses the KernelZero delivery contract and a 160 WPM target", () => {
+  assert.match(
+    CHATTERBOX_TTS_DELIVERY_PROMPT,
+    /^You are the host of KernelZero,/,
+  );
+  assert.match(
+    CHATTERBOX_TTS_DELIVERY_PROMPT,
+    /Read the transcript exactly as written\./,
+  );
+  assert.match(
+    CHATTERBOX_TTS_DELIVERY_PROMPT,
+    /Medium pace \(around 155–165 words per minute\)/,
+  );
+  assert.match(
+    CHATTERBOX_TTS_DELIVERY_PROMPT,
+    /Change or paraphrase the transcript/,
+  );
+  assert.equal(CHATTERBOX_TARGET_WORDS_PER_MINUTE, 160);
+  assert.equal(CHATTERBOX_MAX_TEMPO_ADJUSTMENT, 0.15);
+  assert.equal(CHATTERBOX_MIN_WORDS_PER_MINUTE, 130);
+  assert.equal(CHATTERBOX_MAX_WORDS_PER_MINUTE, 190);
+  assert.deepEqual(chatterboxWordsPerMinuteRange("", ""), {
+    minWordsPerMinute: 130,
+    maxWordsPerMinute: 190,
+  });
+  assert.deepEqual(chatterboxWordsPerMinuteRange("140", "180"), {
+    minWordsPerMinute: 140,
+    maxWordsPerMinute: 180,
+  });
+  assert.throws(
+    () => chatterboxWordsPerMinuteRange("191", "190"),
+    /must be lower/,
+  );
+  assert.throws(
+    () => chatterboxWordsPerMinuteRange("161", "190"),
+    /must include the 160 WPM target/,
+  );
+  assert.equal(
+    chatterboxTargetDurationSeconds(
+      Array.from({ length: 160 }, () => "word").join(" "),
+    ),
+    60,
+  );
+  assert.equal(chatterboxTargetDurationSeconds(""), null);
+  assert.equal(chatterboxMaxTempoAdjustment(""), 0.15);
+  assert.equal(chatterboxMaxTempoAdjustment("0.1"), 0.1);
+  assert.equal(chatterboxMaxTempoAdjustment("0.4"), 0.15);
+  assert.throws(
+    () => chatterboxMaxTempoAdjustment("-0.1"),
+    /must be a non-negative number/,
+  );
 });
 
 test("macOS narration and duration correction preserve natural pacing", () => {
@@ -601,6 +750,10 @@ test("macOS narration and duration correction preserve natural pacing", () => {
 test("shared podcast prompts require a human male host and clean transcripts", () => {
   assert.match(PODCAST_HOST_STYLE_INSTRUCTION, /adult male podcast host/);
   assert.match(PODCAST_HOST_STYLE_INSTRUCTION, /Never include stage directions/);
+  assert.match(
+    PODCAST_HOST_STYLE_INSTRUCTION,
+    /Never tell the listener[\s\S]*written, generated, produced, or narrated by or with AI/,
+  );
   assert.match(PODCAST_AUDIO_DELIVERY_INSTRUCTION, /subtle lift in energy/);
   assert.match(
     withPodcastHostStyle("Base instruction."),
@@ -616,6 +769,49 @@ test("shared podcast prompts require a human male host and clean transcripts", (
     true,
   );
   assert.equal(openAiSpeechModelSupportsInstructions("tts-1-hd"), false);
+});
+
+test("Ollama uses the supplied KernelZero section-writing contract", () => {
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /^You are the lead writer for KernelZero,/,
+  );
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /Apply ONLY when CURRENT_SECTION = "Why This Matters"/,
+  );
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /"Welcome to KernelZero\."/,
+  );
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /"That's today's episode of KernelZero\."[\s\S]*"Until next time, stay curious\."/,
+  );
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /Return ONLY the requested JSON\.$/,
+  );
+});
+
+test("spoken transcript guard removes only AI-production disclosures", () => {
+  assert.equal(
+    removeAiProductionDisclosures(
+      [
+        "Welcome back.",
+        "This episode was written and narrated with AI, then held for human review.",
+        "The source examines an AI-produced podcast and reports mixed listener reactions.",
+        "That distinction matters.",
+      ].join(" "),
+    ),
+    "Welcome back. The source examines an AI-produced podcast and reports mixed listener reactions. That distinction matters.",
+  );
+  assert.equal(
+    removeAiProductionDisclosures(
+      "I'm an AI narrator. Here is the evidence-grounded story.",
+    ),
+    "Here is the evidence-grounded story.",
+  );
 });
 
 test("escapes feed XML values", () => {
@@ -757,6 +953,235 @@ test("Ollama evidence review ignores source-backed model-name non-issues", () =>
     ),
     true,
   );
+});
+
+test("Ollama evidence review accepts code-backed token capacity", () => {
+  const issue = {
+    sectionNumber: 4,
+    problem:
+      "The text mentions a specific number of tokens that the system can manage in a basic scenario.",
+    instruction: "Remove unsupported token limits.",
+    kind: "exact_number" as const,
+    unsupportedDetail: "16 tokens",
+  };
+  const section =
+    "In this basic scenario, the tiny system can manage up to 16 tokens at a time.";
+
+  assert.equal(
+    isActionableEvidenceIssue(
+      issue,
+      [
+        item({
+          summary:
+            "The example initializes block_size = 16 # maximum sequence length before training.",
+        }),
+      ],
+      section,
+    ),
+    false,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      issue,
+      [
+        item({
+          summary:
+            "The example sets n_embd = 16 # embedding dimension. Its maximum sequence length is not stated.",
+        }),
+      ],
+      section,
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...issue, unsupportedDetail: "16 million tokens" },
+      [
+        item({
+          summary:
+            "The example initializes block_size = 16 # maximum sequence length before training.",
+        }),
+      ],
+      "In this scenario, the system can manage up to 16 million tokens.",
+    ),
+    true,
+  );
+});
+
+test("Ollama evidence review requires an excerpt from the flagged section", () => {
+  const baseIssue = {
+    sectionNumber: 4,
+    problem: "A result may be unsupported.",
+    instruction: "Remove the unsupported result.",
+    kind: "method_result" as const,
+  };
+
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "" },
+      [item()],
+      "The section contains only grounded material.",
+    ),
+    false,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "a result that is not in the draft" },
+      [item()],
+      "The section contains only grounded material.",
+    ),
+    false,
+  );
+});
+
+test("Ollama evidence review equates digit and spoken source numbers", () => {
+  const source = item({
+    summary:
+      "Angular Aria includes 12 UI patterns for accessible applications.",
+  });
+  const baseIssue = {
+    sectionNumber: 4,
+    problem: "The pattern count may be unsupported.",
+    instruction: "Use only the source-backed pattern count.",
+    kind: "exact_number" as const,
+  };
+
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "twelve UI patterns" },
+      [source],
+      "Angular Aria includes twelve UI patterns for accessible applications.",
+    ),
+    false,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "13 UI patterns" },
+      [source],
+      "Angular Aria includes 13 UI patterns for accessible applications.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "12 UI patterns" },
+      [
+        item({ summary: "Angular Aria does not include 12 UI patterns." }),
+      ],
+      "Angular Aria includes 12 UI patterns for accessible applications.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "12 UI patterns" },
+      [
+        item({ summary: "Angular Aria includes 12." }),
+        item({ summary: "UI patterns can improve accessibility." }),
+      ],
+      "Angular Aria includes 12 UI patterns for accessible applications.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "12 UI patterns" },
+      [item({ summary: "Angular Aria includes 12.5 UI patterns." })],
+      "Angular Aria includes 12 UI patterns for accessible applications.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "twelve UI patterns" },
+      [item({ summary: "The baseline includes 12 UI patterns." })],
+      "Angular Aria includes twelve UI patterns.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      {
+        ...baseIssue,
+        unsupportedDetail: "Angular Aria includes twelve",
+      },
+      [item({ summary: "Angular Aria includes 12." })],
+      "Angular Aria includes twelve.",
+    ),
+    false,
+  );
+});
+
+test("Ollama evidence review accepts a code-backed character tokenizer", () => {
+  const unsupportedDetail =
+    "the tokenizer assigns one integer to each unique character";
+  const issue = {
+    sectionNumber: 3,
+    problem: "The tokenizer description may be inaccurate.",
+    instruction: "Describe only the supplied implementation.",
+    kind: "method_result" as const,
+    unsupportedDetail,
+  };
+  const section = `In the example, ${unsupportedDetail}.`;
+
+  assert.equal(
+    isActionableEvidenceIssue(
+      issue,
+      [
+        item({
+          summary:
+            "The code uses chars = sorted(set(text)) and stoi = {ch: i for i, ch in enumerate(chars)}.",
+        }),
+      ],
+      section,
+    ),
+    false,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      issue,
+      [item({ summary: "The code uses chars = sorted(set(text))." })],
+      section,
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      {
+        ...issue,
+        unsupportedDetail:
+          "the tokenizer does not assign one integer to each unique character",
+      },
+      [
+        item({
+          summary:
+            "The code uses chars = sorted(set(text)) and stoi = {ch: i for i, ch in enumerate(chars)}.",
+        }),
+      ],
+      "The tokenizer does not assign one integer to each unique character.",
+    ),
+    true,
+  );
+});
+
+test("Ollama trimming never turns an arbitrary word slice into a sentence", () => {
+  const complete = `${Array.from(
+    { length: 27 },
+    (_, index) => `complete${index}`,
+  ).join(" ")}.`;
+  const overlong =
+    `${complete} This unsupported continuation keeps wandering and leading to a bad ending.`;
+
+  assert.equal(trimNarrationToCompleteSentences(overlong, 35), complete);
+  assert.equal(
+    trimNarrationToCompleteSentences(
+      "one two three four five six seven eight nine ten",
+      5,
+    ),
+    "one two three four five six seven eight nine ten",
+  );
+  assert.equal(hasDanglingNarrationEnding("The draft stops, leading to."), true);
+  assert.equal(hasDanglingNarrationEnding("This is what the evidence leads to."), false);
 });
 
 test("Ollama connection failures identify the local service", async () => {
@@ -1015,7 +1440,10 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
         })),
       });
     }
-    if (system.includes("write one section")) {
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
       const sectionNumber = Number(
         user.match(/Section (\d+) focus:/)?.[1],
       );
@@ -1062,6 +1490,7 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
   process.env.OLLAMA_PARALLELISM = "3";
   let writerCalls = 0;
   let expansionCalls = 0;
+  const expansionPrompts: string[] = [];
   let activeExpansions = 0;
   let peakExpansions = 0;
 
@@ -1092,19 +1521,27 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
         })),
       });
     }
-    if (system.includes("write one section")) {
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
       writerCalls += 1;
       const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      const initialWords = sectionNumber === 4 ? 39 : 60;
       return ndjson({
         script: Array.from(
-          { length: 60 },
+          { length: initialWords },
           (_, index) => `initial${sectionNumber}word${index}`,
         ).join(" ") + ".",
         claims: [],
       });
     }
-    if (system.includes("add one new paragraph")) {
+    if (
+      /write one section/i.test(system) &&
+      /Write \d+–\d+ new words for section/.test(user)
+    ) {
       expansionCalls += 1;
+      expansionPrompts.push(user);
       activeExpansions += 1;
       peakExpansions = Math.max(peakExpansions, activeExpansions);
       const match = user.match(
@@ -1140,6 +1577,11 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
     assert.equal(expansionCalls, 5);
     assert.equal(peakExpansions, 3);
     assert.equal(countScriptWords(generated.script), 1_264);
+    assert.ok(
+      expansionPrompts.every((prompt) =>
+        prompt.includes("Do not introduce a new trend, shift, hardware")
+      ),
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
@@ -1147,12 +1589,16 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
   }
 });
 
-test("Ollama critics repair only flagged sections before the final review", async () => {
+test("Ollama critics repair a new evidence issue that appears on a late audit", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
   process.env.OLLAMA_PARALLELISM = "3";
   const sectionWords = [28, 53, 73, 77, 49, 77, 48];
+  const unsupportedDetail = "invented cascade result";
+  const lateUnsupportedDetail =
+    "This trend highlights a shift toward specialized hardware for inference.";
   const writerCalls = Array.from({ length: 7 }, () => 0);
+  const repairPrompts: string[] = [];
   let evidenceCalls = 0;
   let narrativeCalls = 0;
 
@@ -1188,27 +1634,56 @@ test("Ollama critics repair only flagged sections before the final review", asyn
         })),
       });
     }
-    if (system.includes("write one section")) {
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
       const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
       writerCalls[sectionNumber - 1] += 1;
+      const revision = writerCalls[sectionNumber - 1];
+      if (
+        (sectionNumber === 3 && revision > 1) ||
+        (sectionNumber === 6 && revision > 1)
+      ) {
+        repairPrompts.push(user);
+      }
+      const includedDetail = sectionNumber === 3 && revision <= 2
+        ? unsupportedDetail
+        : sectionNumber === 6 && revision === 1
+          ? lateUnsupportedDetail
+          : "";
+      const reservedWords = countScriptWords(includedDetail);
       return ndjson({
-        script: Array.from(
-          { length: sectionWords[sectionNumber - 1] },
-          () => `section${sectionNumber}revision${writerCalls[sectionNumber - 1]}`,
-        ).join(" "),
+        script: [
+          ...(includedDetail ? [includedDetail] : []),
+          ...Array.from(
+            { length: sectionWords[sectionNumber - 1] - reservedWords },
+            () => `section${sectionNumber}revision${revision}`,
+          ),
+        ].join(" "),
         claims: [],
       });
     }
     if (system.includes("source-fabrication checker")) {
       evidenceCalls += 1;
       return ndjson({
-        issues: evidenceCalls === 1
+        issues: evidenceCalls <= 2
           ? [{
               sectionNumber: 3,
               problem: "One method detail is unsupported.",
               instruction: "Remove the unsupported method detail.",
+              kind: "method_result",
+              unsupportedDetail,
             }]
-          : [],
+          : evidenceCalls === 3
+            ? [{
+                sectionNumber: 6,
+                problem: "The hardware trend is not supported.",
+                instruction: "Remove the unsupported trend.",
+                kind: "method_result",
+                unsupportedDetail: lateUnsupportedDetail,
+              }]
+            : [],
       });
     }
     if (system.includes("podcast narrative editor")) {
@@ -1225,9 +1700,18 @@ test("Ollama critics repair only flagged sections before the final review", asyn
       "brief",
     );
     assert.equal(countScriptWords(generated.script), 405);
-    assert.deepEqual(writerCalls, [1, 1, 2, 1, 1, 1, 1]);
-    assert.equal(evidenceCalls, 2);
-    assert.equal(narrativeCalls, 2);
+    assert.deepEqual(writerCalls, [1, 1, 3, 1, 1, 2, 1]);
+    assert.equal(evidenceCalls, 4);
+    assert.equal(narrativeCalls, 4);
+    assert.equal(repairPrompts.length, 3);
+    for (const prompt of repairPrompts.slice(0, 2)) {
+      assert.match(prompt, /Evidence \(method_result\)/);
+      assert.match(prompt, /Exact flagged excerpt: "invented cascade result"/);
+    }
+    assert.match(
+      repairPrompts[2],
+      /Exact flagged excerpt: "This trend highlights a shift toward specialized hardware for inference\."/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
@@ -1235,13 +1719,102 @@ test("Ollama critics repair only flagged sections before the final review", asyn
   }
 });
 
-test("Ollama disables thinking and retries bounded output by generation stage", async () => {
+test("Ollama stops after two repairs of the same evidence issue", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  process.env.OLLAMA_PARALLELISM = "3";
+  const sectionWords = [28, 53, 73, 77, 49, 77, 48];
+  const unsupportedDetail = "persistent unsupported claim";
+  const writerCalls = Array.from({ length: 7 }, () => 0);
+  let evidenceCalls = 0;
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      return ndjson({
+        title: "Bounded evidence repair",
+        dek: "Persistent issues stop after a fixed budget.",
+        facts: [],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Section ${index + 1} focus.`,
+        })),
+      });
+    }
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
+      const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      writerCalls[sectionNumber - 1] += 1;
+      const reservedWords = sectionNumber === 3
+        ? countScriptWords(unsupportedDetail)
+        : 0;
+      return ndjson({
+        script: [
+          ...(sectionNumber === 3 ? [unsupportedDetail] : []),
+          ...Array.from(
+            { length: sectionWords[sectionNumber - 1] - reservedWords },
+            () => `section${sectionNumber}word`,
+          ),
+        ].join(" "),
+        claims: [],
+      });
+    }
+    if (system.includes("source-fabrication checker")) {
+      evidenceCalls += 1;
+      return ndjson({
+        issues: [{
+          sectionNumber: 3,
+          problem: "The claim remains unsupported.",
+          instruction: "Remove it.",
+          kind: "method_result",
+          unsupportedDetail,
+        }],
+      });
+    }
+    if (system.includes("podcast narrative editor")) {
+      return ndjson({ issues: [] });
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      createOllamaPodcast([item()], "daily_digest", "brief"),
+      /Final evidence review failed in section 3/,
+    );
+    assert.deepEqual(writerCalls, [1, 1, 3, 1, 1, 1, 1]);
+    assert.equal(evidenceCalls, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
+test("Ollama falls back instead of doubling a runaway editorial plan", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
   const requests: Array<{
     keep_alive: string;
     think: boolean;
     format?: Record<string, unknown>;
+    messages?: Array<{ content: string }>;
     options: { num_predict: number };
   }> = [];
   process.env.OLLAMA_PARALLELISM = "1";
@@ -1258,14 +1831,50 @@ test("Ollama disables thinking and retries bounded output by generation stage", 
         { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
       );
     }
-    if (requests.length === 2) {
+    throw new Error("Stop after inspecting the fallback section request.");
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      createOllamaPodcast([item()], "daily_digest", "standard"),
+      /Stop after inspecting the fallback section request/,
+    );
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].think, false);
+    assert.equal(requests[0].keep_alive, "30m");
+    assert.equal(requests[0].options.num_predict, 2_048);
+    assert.ok(requests[0].format);
+    assert.match(
+      requests[0].messages?.[1]?.content ?? "",
+      /no more than 12 source-grounded fact cards/,
+    );
+    assert.equal(requests[1].think, false);
+    assert.ok(requests[1].options.num_predict >= 1_536);
+    assert.ok(requests[1].options.num_predict <= 3_072);
+    assert.ok(requests[1].format);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
+test("Ollama falls back when the editorial plan stops with partial JSON", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  const requests: Array<{
+    messages?: Array<{ content: string }>;
+  }> = [];
+  process.env.OLLAMA_PARALLELISM = "1";
+
+  globalThis.fetch = (async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    if (requests.length === 1) {
       return new Response(
         `${JSON.stringify({
           message: {
-            content: JSON.stringify({
-              title: "Bounded local generation",
-              dek: "A grounded briefing.",
-            }),
+            content:
+              "{\"title\":\"The Core of AI\",\"dek\":\"Explore how the fundamental",
           },
           done: true,
           done_reason: "stop",
@@ -1273,26 +1882,19 @@ test("Ollama disables thinking and retries bounded output by generation stage", 
         { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
       );
     }
-    throw new Error("Stop after inspecting the section request.");
+    throw new Error("Reached a section after the partial-plan fallback.");
   }) as typeof fetch;
 
   try {
     await assert.rejects(
       createOllamaPodcast([item()], "daily_digest", "standard"),
-      /Stop after inspecting the section request/,
+      /Reached a section after the partial-plan fallback/,
     );
-    assert.equal(requests.length, 3);
-    assert.equal(requests[0].think, false);
-    assert.equal(requests[0].keep_alive, "30m");
-    assert.equal(requests[0].options.num_predict, 2_048);
-    assert.ok(requests[0].format);
-    assert.equal(requests[1].think, false);
-    assert.equal(requests[1].options.num_predict, 4_096);
-    assert.ok(requests[1].format);
-    assert.equal(requests[2].think, false);
-    assert.ok(requests[2].options.num_predict >= 1_536);
-    assert.ok(requests[2].options.num_predict <= 3_072);
-    assert.ok(requests[2].format);
+    assert.equal(requests.length, 2);
+    assert.match(
+      requests[1].messages?.[0]?.content ?? "",
+      /write one section/i,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
@@ -1428,6 +2030,14 @@ test("generation rewrites an intro-sized response before creating an episode", a
     });
     assert.equal(countScriptWords(generated.episode.script), 1_350);
     assert.equal(generated.episode.durationSeconds, 540);
+    assert.match(
+      generated.episode.id,
+      /^episode-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    assert.match(
+      generated.evidence[0].id,
+      /^evidence-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     assert.equal(requests.length, 2);
     const initialBody = JSON.parse(String(requests[0].body)) as {
       input: Array<{ content: Array<{ text: string }> }>;
@@ -1537,11 +2147,13 @@ test("OpenAI speech receives the podcast performance direction", async () => {
   const originalSkipVerification = process.env.SKIP_EVIDENCE_VERIFICATION;
   const originalTtsModel = process.env.OPENAI_TTS_MODEL;
   const originalTtsVoice = process.env.OPENAI_TTS_VOICE;
-  let speechRequest: Record<string, unknown> | null = null;
-  const script = Array.from(
+  const speechRequests: Array<Record<string, unknown>> = [];
+  const cleanScript = Array.from(
     { length: 405 },
     (_, index) => `spoken${index}`,
   ).join(" ");
+  const script =
+    `This episode was written and produced by AI. ${cleanScript}`;
 
   process.env.AI_PROVIDER = "openai";
   process.env.OPENAI_API_KEY = "test-key";
@@ -1550,7 +2162,9 @@ test("OpenAI speech receives the podcast performance direction", async () => {
   process.env.OPENAI_TTS_VOICE = "onyx";
   globalThis.fetch = (async (input, init) => {
     if (String(input).endsWith("/v1/audio/speech")) {
-      speechRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      speechRequests.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
       return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
     }
     return new Response(
@@ -1573,12 +2187,20 @@ test("OpenAI speech receives the podcast performance direction", async () => {
       includeAudio: true,
       episodeLength: "brief",
     });
+    const speechRequest = speechRequests[0];
+    assert.ok(speechRequest);
     assert.equal(generated.audioContentType, "audio/mpeg");
     assert.equal(speechRequest?.model, "gpt-4o-mini-tts");
     assert.equal(speechRequest?.voice, "onyx");
     assert.equal(
       speechRequest?.instructions,
       PODCAST_AUDIO_DELIVERY_INSTRUCTION,
+    );
+    assert.equal(generated.episode.script, cleanScript);
+    assert.equal(generated.episode.transcript, cleanScript);
+    assert.doesNotMatch(
+      String(speechRequest?.input ?? ""),
+      /written and produced by AI/i,
     );
   } finally {
     globalThis.fetch = originalFetch;

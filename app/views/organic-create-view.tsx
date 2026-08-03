@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { selectTopItemPerSource } from "../../lib/domain";
 import { episodeLengthProfile } from "../../lib/podcast-length";
 import type { DashboardState, EpisodeLength } from "../../lib/types";
 
@@ -23,7 +24,10 @@ export function OrganicCreateView({
   const [generationTime, setGenerationTime] = useState("08:00");
   const [weekdays, setWeekdays] = useState([true, true, true, true, true, false, false]);
   const [distribution, setDistribution] = useState({ spotify: true, apple: false });
-  const selectedItems = useMemo(() => state.items.filter((item) => item.sourceId && selectedSourceIds.includes(item.sourceId)), [state.items, selectedSourceIds]);
+  const selectedItems = useMemo(
+    () => selectTopItemPerSource(state.items, selectedSourceIds),
+    [state.items, selectedSourceIds],
+  );
 
   return (
     <div className="organic-create">

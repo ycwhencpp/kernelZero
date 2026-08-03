@@ -12,7 +12,6 @@ export async function PATCH(request: Request) {
         { status: 400 },
       );
     }
-
     const db = getSupabase();
     if (db) {
       const { error } = await db

@@ -1,4 +1,5 @@
 import { buildTechRadar } from "./domain";
+import { mediaUrl } from "./media-path";
 import { normalizeEpisodeLength } from "./podcast-length";
 import { normalizeEvidenceConfidence } from "./podcast-schema";
 import { getSupabase, MEDIA_BUCKET } from "./supabase";
@@ -9,11 +10,10 @@ import type { Collection, ContentItem, DashboardState, Episode, EvidenceClaim, I
 type Row = Record<string, any>;
 const iso = (value: unknown) => value ? new Date(String(value)).toISOString() : null;
 const array = <T>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
-
 function mapInterest(row: Row): InterestProfile { return { id: row.id, name: row.name, query: row.query, keywords: array(row.keywords_json), exclusions: array(row.exclusions_json), preferredSources: array(row.preferred_sources_json), freshnessDays: row.freshness_days, weight: Number(row.weight), enabled: Boolean(row.enabled) }; }
 function mapSource(row: Row): Source { return { id: row.id, name: row.name, type: row.type, url: row.url, trustLevel: row.trust_level, rightsMode: row.rights_mode, enabled: Boolean(row.enabled), lastSuccessfulFetch: iso(row.last_successful_fetch) }; }
 function mapItem(row: Row): ContentItem { return { id: row.id, kind: row.kind, title: row.title, summary: row.summary, authors: array(row.authors_json), sourceName: row.source_name, sourceId: row.source_id ?? undefined, canonicalUrl: row.canonical_url, doi: row.doi ?? undefined, arxivId: row.arxiv_id ?? undefined, publishedAt: iso(row.published_at)!, accessLevel: row.access_level, peerReviewState: row.peer_review_state, topics: array(row.topics_json), score: Number(row.score), trend: row.trend, citationCount: Number(row.citation_count), readingMinutes: Number(row.reading_minutes), saved: Boolean(row.saved), listened: Boolean(row.listened), processingState: row.processing_state }; }
-function mapEpisode(row: Row): Episode { return { id: row.id, contentItemId: row.content_item_id ?? undefined, type: row.type, title: row.title, dek: row.dek, script: row.script, showNotes: row.show_notes, transcript: row.transcript, citations: array(row.citations_json), chapters: array(row.chapters_json), audioUrl: row.audio_url, audioKey: row.audio_key, audioBytes: row.audio_bytes, durationSeconds: Number(row.duration_seconds), status: row.status, publishedAt: iso(row.published_at), immutableGuid: row.immutable_guid, generation: Number(row.generation), createdAt: iso(row.created_at)! }; }
+function mapEpisode(row: Row): Episode { const audioKey = typeof row.audio_key === "string" ? row.audio_key : null; return { id: row.id, contentItemId: row.content_item_id ?? undefined, type: row.type, title: row.title, dek: row.dek, script: row.script, showNotes: row.show_notes, transcript: row.transcript, citations: array(row.citations_json), chapters: array(row.chapters_json), audioUrl: audioKey ? mediaUrl(audioKey) : row.audio_url, audioKey, audioBytes: row.audio_bytes, durationSeconds: Number(row.duration_seconds), status: row.status, publishedAt: iso(row.published_at), immutableGuid: row.immutable_guid, generation: Number(row.generation), createdAt: iso(row.created_at)! }; }
 function mapEvidence(row: Row): EvidenceClaim { return { id: row.id, episodeId: row.episode_id, contentItemId: row.content_item_id, claim: row.claim, support: row.support, sourceUrl: row.source_url, confidence: normalizeEvidenceConfidence(row.confidence), location: row.location }; }
 function mapVoiceProfile(row: Row): VoiceProfile { return { id: row.id, name: row.display_name, provider: "chatterbox", active: Boolean(row.active), createdAt: iso(row.created_at)! }; }
 function workspaceSettings(row: Row | null | undefined): WorkspaceSettings { return { dailyGeneration: row?.daily_generation_enabled ?? true, episodeLength: normalizeEpisodeLength(row?.episode_length), publishTime: typeof row?.publish_time === "string" && /^\d{2}:\d{2}$/.test(row.publish_time) ? row.publish_time : "08:00" }; }
@@ -23,17 +23,30 @@ function itemRow(ownerId: string, value: ContentItem): Row { return { id: value.
 export function storedDurationSeconds(value: number): number {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
-function episodeRow(ownerId: string, value: Episode): Row { return { id: value.id, owner_id: ownerId, content_item_id: value.contentItemId ?? null, type: value.type, title: value.title, dek: value.dek, script: value.script, show_notes: value.showNotes, transcript: value.transcript, citations_json: value.citations, chapters_json: value.chapters, audio_url: value.audioUrl, audio_key: value.audioKey ?? null, audio_bytes: value.audioBytes ?? null, duration_seconds: storedDurationSeconds(value.durationSeconds), status: value.status, published_at: value.publishedAt, immutable_guid: value.immutableGuid, generation: value.generation, created_at: value.createdAt, updated_at: new Date().toISOString() }; }
+function episodeRow(ownerId: string, value: Episode): Row { return { id: value.id, owner_id: ownerId, content_item_id: value.contentItemId ?? null, type: value.type, title: value.title, dek: value.dek, script: value.script, show_notes: value.showNotes, transcript: value.transcript, citations_json: value.citations, citation_count: value.citations.length, chapters_json: value.chapters, audio_url: value.audioUrl, audio_key: value.audioKey ?? null, audio_bytes: value.audioBytes ?? null, duration_seconds: storedDurationSeconds(value.durationSeconds), status: value.status, published_at: value.publishedAt, immutable_guid: value.immutableGuid, generation: value.generation, created_at: value.createdAt, updated_at: new Date().toISOString() }; }
 
 async function requireDb() { return getSupabase(); }
+export async function findAuthenticatedOwnerIdByEmail(
+  email: string,
+): Promise<string | null> {
+  const db = await requireDb();
+  if (!db) return null;
+  const { data, error } = await db
+    .from("profiles")
+    .select("id, auth_user_id")
+    .eq("email", email.trim().toLowerCase())
+    .maybeSingle();
+  if (error) throw new Error(`Unable to resolve the cron owner: ${error.message}`);
+  return data?.auth_user_id ? String(data.id) : null;
+}
 async function ensureOwner(ownerId: string) {
   const db = await requireDb();
   if (!db) return;
   const { data, error: lookupError } = await db.from("profiles").select("id").eq("id", ownerId).maybeSingle();
   if (lookupError) throw new Error(`Unable to initialize profile: ${lookupError.message}`);
-  if (data) return;
-  const { error } = await db.from("profiles").insert({ id: ownerId, email: ownerId, display_name: ownerId.split("@")[0] || "KernelZero user", role: "owner", workspace_owner_id: ownerId, timezone: "Asia/Kolkata", daily_budget_usd: 2 });
-  if (error && !/duplicate key/i.test(error.message)) throw new Error(`Unable to initialize profile: ${error.message}`);
+  if (!data) {
+    throw new Error("Workspace owner profile not found.");
+  }
 }
 
 function emptyState(): DashboardState {
@@ -53,7 +66,7 @@ export async function getDashboardState(ownerId: string): Promise<DashboardState
   const collectionIds = (collections.data ?? []).map((row: Row) => row.id);
   const episodeIds = mappedEpisodes.map((episode) => episode.id);
   const [memberships, evidence] = await Promise.all([
-    collectionIds.length ? db.from("collection_items").select().in("collection_id", collectionIds) : Promise.resolve({ data: [] as Row[] }),
+    collectionIds.length ? db.from("collection_items").select().eq("owner_id", ownerId).in("collection_id", collectionIds) : Promise.resolve({ data: [] as Row[] }),
     episodeIds.length ? db.from("evidence").select().in("episode_id", episodeIds) : Promise.resolve({ data: [] as Row[] }),
   ]);
   const membership = new Map<string, string[]>(); for (const row of memberships.data ?? []) membership.set(row.collection_id, [...(membership.get(row.collection_id) ?? []), row.content_item_id]);
@@ -66,9 +79,9 @@ export async function getDashboardState(ownerId: string): Promise<DashboardState
 
 export async function saveItem(ownerId: string, itemId: string, saved: boolean) { const db = await requireDb(); if (db) await db.from("content_items").update({ saved, updated_at: new Date().toISOString() }).eq("id", itemId).eq("owner_id", ownerId); }
 export async function recordFeedback(ownerId: string, itemId: string, action: "saved" | "skipped" | "listened" | "rating", value?: number) { const db = await requireDb(); if (!db) return; const normalized = action === "rating" ? Math.max(1, Math.min(5, Math.round(value ?? 3))) : value ?? 1; const delta = action === "saved" ? (normalized > 0 ? 4 : -4) : action === "skipped" ? -14 : action === "listened" ? 5 : (normalized - 3) * 4; const { data } = await db.from("content_items").select("score, saved, listened").eq("id", itemId).eq("owner_id", ownerId).single(); await db.from("feedback").insert({ id: `feedback-${crypto.randomUUID()}`, owner_id: ownerId, content_item_id: itemId, action, value: normalized }); if (data) await db.from("content_items").update({ score: Math.max(0, Math.min(100, Math.round(Number(data.score) + delta))), saved: action === "saved" ? normalized > 0 : data.saved, listened: action === "listened" || data.listened, updated_at: new Date().toISOString() }).eq("id", itemId).eq("owner_id", ownerId); }
-export async function personalizeItems(ownerId: string, items: ContentItem[]): Promise<ContentItem[]> { const db = await requireDb(); if (!db || !items.length) return items; const { data } = await db.from("feedback").select("action, value, content_item_id").eq("owner_id", ownerId).order("created_at", { ascending: false }).limit(200); const ids = [...new Set((data ?? []).map((x: Row) => x.content_item_id))]; const { data: prior } = ids.length ? await db.from("content_items").select("id, source_name, topics_json").in("id", ids) : { data: [] as Row[] }; const metadata = new Map((prior ?? []).map((x: Row) => [x.id, x])); const source = new Map<string, number>(), topics = new Map<string, number>(); for (const feedback of data ?? []) { const item = metadata.get(feedback.content_item_id); if (!item) continue; const signal = feedback.action === "saved" ? (feedback.value > 0 ? 2.5 : -1) : feedback.action === "skipped" ? -5 : feedback.action === "listened" ? 3 : (feedback.value - 3) * 2; source.set(item.source_name.toLowerCase(), (source.get(item.source_name.toLowerCase()) ?? 0) + signal); for (const topic of array<string>(item.topics_json)) topics.set(topic.toLowerCase(), (topics.get(topic.toLowerCase()) ?? 0) + signal); } return items.map((item) => ({ ...item, score: Math.max(0, Math.min(100, Math.round(item.score + (source.get(item.sourceName.toLowerCase()) ?? 0) + item.topics.reduce((sum, topic) => sum + (topics.get(topic.toLowerCase()) ?? 0), 0)))) })); }
-export async function addInterest(ownerId: string, value: InterestProfile) { const db = await requireDb(); if (db) await db.from("interest_profiles").upsert(interestRow(ownerId, value)); }
-export async function addSource(ownerId: string, value: Source) { const db = await requireDb(); if (db) await db.from("sources").upsert(sourceRow(ownerId, value)); }
+export async function personalizeItems(ownerId: string, items: ContentItem[]): Promise<ContentItem[]> { const db = await requireDb(); if (!db || !items.length) return items; const { data } = await db.from("feedback").select("action, value, content_item_id").eq("owner_id", ownerId).order("created_at", { ascending: false }).limit(200); const ids = [...new Set((data ?? []).map((x: Row) => x.content_item_id))]; const { data: prior } = ids.length ? await db.from("content_items").select("id, source_name, topics_json").eq("owner_id", ownerId).in("id", ids) : { data: [] as Row[] }; const metadata = new Map((prior ?? []).map((x: Row) => [x.id, x])); const source = new Map<string, number>(), topics = new Map<string, number>(); for (const feedback of data ?? []) { const item = metadata.get(feedback.content_item_id); if (!item) continue; const signal = feedback.action === "saved" ? (feedback.value > 0 ? 2.5 : -1) : feedback.action === "skipped" ? -5 : feedback.action === "listened" ? 3 : (feedback.value - 3) * 2; source.set(item.source_name.toLowerCase(), (source.get(item.source_name.toLowerCase()) ?? 0) + signal); for (const topic of array<string>(item.topics_json)) topics.set(topic.toLowerCase(), (topics.get(topic.toLowerCase()) ?? 0) + signal); } return items.map((item) => ({ ...item, score: Math.max(0, Math.min(100, Math.round(item.score + (source.get(item.sourceName.toLowerCase()) ?? 0) + item.topics.reduce((sum, topic) => sum + (topics.get(topic.toLowerCase()) ?? 0), 0)))) })); }
+export async function addInterest(ownerId: string, value: InterestProfile) { const db = await requireDb(); if (db) await db.from("interest_profiles").upsert(interestRow(ownerId, value), { onConflict: "owner_id,id" }); }
+export async function addSource(ownerId: string, value: Source) { const db = await requireDb(); if (db) await db.from("sources").upsert(sourceRow(ownerId, value), { onConflict: "owner_id,id" }); }
 export async function saveWorkspaceSettings(ownerId: string, value: WorkspaceSettings) { const db = await requireDb(); if (!db) return; await ensureOwner(ownerId); const { error } = await db.from("profiles").update({ daily_generation_enabled: value.dailyGeneration, episode_length: value.episodeLength, publish_time: value.publishTime, updated_at: new Date().toISOString() }).eq("id", ownerId); if (error) throw new Error(error.message); }
 export type ActiveVoiceProfile = VoiceProfile & { sampleKey: string };
 export async function getActiveVoiceProfile(ownerId: string): Promise<ActiveVoiceProfile | null> {
@@ -105,7 +118,7 @@ export async function disconnectVoiceProfile(ownerId: string): Promise<string | 
   }
   return typeof previous?.sample_key === "string" ? previous.sample_key : null;
 }
-export async function upsertItems(ownerId: string, items: ContentItem[]) { const db = await requireDb(); if (db && items.length) await db.from("content_items").upsert(items.map((x) => itemRow(ownerId, x))); }
+export async function upsertItems(ownerId: string, items: ContentItem[]) { const db = await requireDb(); if (db && items.length) await db.from("content_items").upsert(items.map((x) => itemRow(ownerId, x)), { onConflict: "owner_id,id" }); }
 export async function findItems(ownerId: string, ids: string[]) { const db = await requireDb(); if (!db || !ids.length) return []; const { data } = await db.from("content_items").select().eq("owner_id", ownerId).in("id", ids); const lookup = new Map((data ?? []).map((x: Row) => [x.id, mapItem(x)])); return ids.map((id) => lookup.get(id)).filter((x): x is ContentItem => Boolean(x)); }
 export async function findEpisode(ownerId: string, episodeId: string): Promise<Episode | null> { const db = await requireDb(); if (!db) return null; const { data, error } = await db.from("episodes").select().eq("owner_id", ownerId).eq("id", episodeId).maybeSingle(); if (error) throw new Error(error.message); return data ? mapEpisode(data) : null; }
 export async function createEpisode(
@@ -139,16 +152,15 @@ export async function createEpisode(
       );
       throw new Error(`Unable to store episode audio: ${error.message}`);
     }
-    const { data } = db.storage.from(MEDIA_BUCKET).getPublicUrl(key);
     uploadedAudioKey = key;
     episode.audioKey = key;
     episode.audioBytes = audio.byteLength;
-    episode.audioUrl = data.publicUrl;
+    episode.audioUrl = mediaUrl(key);
   }
 
   const { error: episodeError } = await db
     .from("episodes")
-    .upsert(episodeRow(ownerId, episode));
+    .insert(episodeRow(ownerId, episode));
   if (episodeError) {
     if (uploadedAudioKey) {
       const { error: cleanupError } = await db.storage
@@ -165,7 +177,7 @@ export async function createEpisode(
   }
 
   if (claims.length) {
-    const { error: evidenceError } = await db.from("evidence").upsert(
+    const { error: evidenceError } = await db.from("evidence").insert(
       claims.map((claim) => ({
         id: claim.id,
         episode_id: claim.episodeId,
@@ -178,6 +190,14 @@ export async function createEpisode(
       })),
     );
     if (evidenceError) {
+      await db
+        .from("episodes")
+        .delete()
+        .eq("id", episode.id)
+        .eq("owner_id", ownerId);
+      if (uploadedAudioKey) {
+        await db.storage.from(MEDIA_BUCKET).remove([uploadedAudioKey]);
+      }
       throw new Error(
         `Unable to store generated episode evidence: ${evidenceError.message}`,
       );
@@ -223,12 +243,12 @@ export async function replaceEpisodeAudio(
   if (uploadError) {
     throw new Error(`Unable to store regenerated audio: ${uploadError.message}`);
   }
-  const { data } = db.storage.from(MEDIA_BUCKET).getPublicUrl(key);
+  const nextAudioUrl = mediaUrl(key);
   const { error } = await db
     .from("episodes")
     .update({
       audio_key: key,
-      audio_url: data.publicUrl,
+      audio_url: nextAudioUrl,
       audio_bytes: audio.byteLength,
       chapters_json: chapters,
       duration_seconds: persistedDurationSeconds,
@@ -243,13 +263,13 @@ export async function replaceEpisodeAudio(
   return {
     ...episode,
     audioKey: key,
-    audioUrl: data.publicUrl,
+    audioUrl: nextAudioUrl,
     audioBytes: audio.byteLength,
     chapters,
     durationSeconds: persistedDurationSeconds,
   };
 }
-export async function approveEpisode(ownerId: string, episodeId: string) { const db = await requireDb(); if (!db) return; const { data } = await db.from("episodes").select("audio_url, published_at").eq("id", episodeId).eq("owner_id", ownerId).single(); if (!data) return; await db.from("episodes").update({ status: data.audio_url ? "published" : "approved", published_at: data.audio_url ? (data.published_at ?? new Date().toISOString()) : null, updated_at: new Date().toISOString() }).eq("id", episodeId).eq("owner_id", ownerId); }
+export async function approveEpisode(ownerId: string, episodeId: string) { const db = await requireDb(); if (!db) return; const { data } = await db.from("episodes").select("audio_key, audio_url, published_at").eq("id", episodeId).eq("owner_id", ownerId).single(); if (!data) return; const hasAudio = Boolean(data.audio_key || data.audio_url); await db.from("episodes").update({ status: hasAudio ? "published" : "approved", published_at: hasAudio ? (data.published_at ?? new Date().toISOString()) : null, updated_at: new Date().toISOString() }).eq("id", episodeId).eq("owner_id", ownerId); }
 export async function updateEpisode(ownerId: string, episodeId: string, patch: Pick<Partial<Episode>, "script" | "transcript" | "showNotes">) {
   const db = await requireDb();
   if (!db) return;
@@ -274,13 +294,22 @@ export async function deleteWorkspace(ownerId: string): Promise<string[]> {
   await db.from("episodes").delete().eq("owner_id", ownerId);
   const { data: collections } = await db.from("collections").select("id").eq("owner_id", ownerId);
   const collectionIds = (collections ?? []).map((row: Row) => row.id);
-  if (collectionIds.length) await db.from("collection_items").delete().in("collection_id", collectionIds);
+  if (collectionIds.length) await db.from("collection_items").delete().eq("owner_id", ownerId).in("collection_id", collectionIds);
   await db.from("collections").delete().eq("owner_id", ownerId);
   await db.from("content_items").delete().eq("owner_id", ownerId);
   await db.from("sources").delete().eq("owner_id", ownerId);
   await db.from("interest_profiles").delete().eq("owner_id", ownerId);
   await db.from("voice_profiles").delete().eq("owner_id", ownerId);
-  await db.from("profiles").delete().eq("id", ownerId);
+  await db
+    .from("profiles")
+    .update({
+      daily_generation_enabled: true,
+      episode_length: "standard",
+      publish_time: "08:00",
+      daily_budget_usd: 2,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", ownerId);
   return (voiceProfiles ?? []).map((profile: Row) => profile.sample_key).filter((key): key is string => typeof key === "string");
 }
 /** Removes generated workspace data while preserving sources, interests, and the local narrator profile. */
@@ -299,11 +328,12 @@ export async function resetGeneratedWorkspaceData(ownerId: string): Promise<void
   const { data: collections, error: collectionsError } = await db.from("collections").select("id").eq("owner_id", ownerId);
   if (collectionsError) throw new Error(collectionsError.message);
   const collectionIds = (collections ?? []).map((collection: Row) => collection.id);
-  if (collectionIds.length) await db.from("collection_items").delete().in("collection_id", collectionIds);
+  if (collectionIds.length) await db.from("collection_items").delete().eq("owner_id", ownerId).in("collection_id", collectionIds);
   await db.from("collections").delete().eq("owner_id", ownerId);
   await db.from("content_items").delete().eq("owner_id", ownerId);
 }
-export async function getPublicEpisodes() { const db = await requireDb(); if (!db) return []; const { data, error } = await db.from("episodes").select().eq("status", "published").not("audio_url", "is", null).order("published_at", { ascending: false }); if (error) throw new Error(error.message); return (data ?? []).map(mapEpisode); }
-export async function getPublicEpisode(id: string) { const db = await requireDb(); if (!db) return null; const { data } = await db.from("episodes").select().eq("id", id).in("status", ["approved", "published"]).maybeSingle(); return data ? mapEpisode(data) : null; }
-export async function getMedia(key: string) { const db = await requireDb(); if (!db) return null; const { data, error } = await db.storage.from(MEDIA_BUCKET).download(key); if (error || !data) return null; return { body: data, contentType: data.type || "audio/mpeg" }; }
-export async function recordJob(ownerId: string, job: { id: string; stage: string; status: JobRun["status"]; provider?: string; costUsd?: number; error?: string }) { const db = await requireDb(); if (db) await db.from("job_runs").upsert({ id: job.id, owner_id: ownerId, stage: job.stage, status: job.status, provider: job.provider ?? null, cost_usd: job.costUsd ?? 0, error: job.error ?? null, idempotency_key: job.id, completed_at: job.status === "completed" || job.status === "failed" ? new Date().toISOString() : null }); }
+export async function getPublicEpisodes() { const db = await requireDb(); if (!db) return []; const { data, error } = await db.from("episodes").select().eq("status", "published").not("audio_key", "is", null).order("published_at", { ascending: false }); if (error) throw new Error(error.message); return (data ?? []).map(mapEpisode); }
+export async function getPublicEpisode(id: string) { const db = await requireDb(); if (!db) return null; const { data } = await db.from("episodes").select().eq("id", id).eq("status", "published").maybeSingle(); return data ? mapEpisode(data) : null; }
+export async function getMediaEpisodeAccess(key: string): Promise<{ ownerId: string; status: Episode["status"] } | null> { const db = await requireDb(); if (!db) return null; const { data, error } = await db.from("episodes").select("owner_id, status").eq("audio_key", key).limit(1).maybeSingle(); if (error) throw new Error(error.message); return data ? { ownerId: data.owner_id, status: data.status } : null; }
+export async function getSignedMediaUrl(key: string, expiresInSeconds = 60) { const db = await requireDb(); if (!db) return null; const { data, error } = await db.storage.from(MEDIA_BUCKET).createSignedUrl(key, expiresInSeconds); if (error || !data?.signedUrl) return null; return data.signedUrl; }
+export async function recordJob(ownerId: string, job: { id: string; stage: string; status: JobRun["status"]; provider?: string; costUsd?: number; error?: string }) { const db = await requireDb(); if (db) await db.from("job_runs").upsert({ id: job.id, owner_id: ownerId, stage: job.stage, status: job.status, provider: job.provider ?? null, cost_usd: job.costUsd ?? 0, error: job.error ?? null, idempotency_key: job.id, completed_at: job.status === "completed" || job.status === "failed" ? new Date().toISOString() : null }, { onConflict: "owner_id,id" }); }

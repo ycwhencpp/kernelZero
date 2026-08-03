@@ -50,7 +50,6 @@ export function SignupForm({ configured }: { configured: boolean }) {
 
     if (data.session) {
       router.replace("/dashboard");
-      router.refresh();
       return;
     }
 
@@ -82,16 +81,16 @@ export function SignupForm({ configured }: { configured: boolean }) {
   }
 
   return (
-    <AuthShell
-      title="Create your account"
-      intro="Join the private workspace with your verified email address."
+      <AuthShell
+        title="Create your account"
+        intro="Create your private workspace with a verified email address."
       footer={
         <>
           <p className="auth-switch">
             Already have an account? <Link href="/login">Sign in</Link>
           </p>
           <p className="auth-access-note">
-            New accounts begin as viewers. The owner assigns elevated roles.
+            Every account starts with its own private production workspace.
           </p>
         </>
       }

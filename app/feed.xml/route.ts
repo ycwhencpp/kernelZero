@@ -14,19 +14,22 @@ export async function GET(request: Request) {
   const email = process.env.PODCAST_EMAIL || "creator@example.com";
   const episodes = await getPublicEpisodes();
   const items = episodes
-    .map(
-      (episode) => `<item>
+    .map((episode) => {
+      const enclosureUrl = episode.audioUrl
+        ? new URL(episode.audioUrl, `${baseUrl}/`).toString()
+        : "";
+      return `<item>
   <title>${escapeXml(episode.title)}</title>
   <description>${escapeXml(`${episode.dek}\n\n${episode.showNotes}`)}</description>
   <guid isPermaLink="false">${escapeXml(episode.immutableGuid)}</guid>
   <link>${escapeXml(`${baseUrl}/?episode=${episode.id}`)}</link>
   <pubDate>${new Date(episode.publishedAt || episode.createdAt).toUTCString()}</pubDate>
-  <enclosure url="${escapeXml(episode.audioUrl || "")}" length="${episode.audioBytes ?? 0}" type="${episode.audioKey?.endsWith(".wav") ? "audio/wav" : "audio/mpeg"}" />
+  <enclosure url="${escapeXml(enclosureUrl)}" length="${episode.audioBytes ?? 0}" type="${episode.audioKey?.endsWith(".wav") ? "audio/wav" : "audio/mpeg"}" />
   <itunes:duration>${formatDuration(episode.durationSeconds)}</itunes:duration>
   <itunes:episodeType>full</itunes:episodeType>
   <podcast:transcript url="${escapeXml(`${baseUrl}/api/transcripts/${episode.id}`)}" type="text/plain" />
-</item>`,
-    )
+</item>`;
+    })
     .join("\n");
 
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
