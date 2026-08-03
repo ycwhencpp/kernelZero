@@ -2,9 +2,21 @@ import { resolveAiProvider, type AiProvider } from "./ai-config";
 
 export const LINKEDIN_POST_MAX_CHARACTERS = 3_000;
 
+// Kept as a floor so the model can't collapse a rich transcript into a two-line post.
+// This is a ratio of LINKEDIN_POST_MAX_CHARACTERS, not a fixed number, so both bounds
+// move together if the max is ever changed.
+export const LINKEDIN_POST_MIN_LENGTH_RATIO = 0.35;
+
 const LINKEDIN_POST_MAX_HASHTAGS = 7;
 
-export const LINKEDIN_POST_PROMPT = `
+export function buildLinkedInPostPrompt(
+  maxCharacters: number = LINKEDIN_POST_MAX_CHARACTERS,
+): string {
+  const minCharacters = Math.round(
+    maxCharacters * LINKEDIN_POST_MIN_LENGTH_RATIO,
+  );
+
+  return `
 You are the writer behind Anurag's personal LinkedIn presence and his "NLogN" content series
 (LLM NLogN, System Design NLogN, and build-in-public engineering stories).
 
@@ -86,6 +98,29 @@ HUMOR RULES
 - If you're not sure whether a line is funny or just try-hard, cut it.
 
 --------------------------------------------------
+LENGTH — deduce it, don't default to it
+--------------------------------------------------
+
+Do not aim for a fixed word count. Aim to give each real beat in the source enough
+room to land, then stop. Work it out in this order:
+
+1. List the distinct beats actually present in the source (e.g. for a debugging story:
+   the plain-language problem, the wrong turn, the real root cause, the fix, the lesson.
+   For a concept explainer: the hook, the mechanism, why it matters). A thin source might
+   only have 2-3 real beats — don't invent a fourth just to fill space.
+2. Give each beat one tight paragraph. If a beat is genuinely simple, its paragraph is
+   short. If a beat needs an analogy or a → chain to land clearly, let it take that room.
+3. The total body must land between ${minCharacters} and ${maxCharacters} characters
+   (title and hashtags are counted separately, not against this budget).
+   - Below ${minCharacters}: you've compressed a beat instead of explaining it — expand
+     the thinnest paragraph, don't pad every paragraph evenly.
+   - Above ${maxCharacters}: you've kept a beat that should have been cut, or you're
+     restating something already said — cut, don't shorten every sentence a little.
+4. Never pad with restated summaries, generic filler ("this shows the importance of..."),
+   or a paragraph that just repeats the lesson in different words to hit a number.
+5. ${maxCharacters} characters is LinkedIn's hard post limit — treat it as a wall, not a target.
+
+--------------------------------------------------
 FORMATTING RULES
 --------------------------------------------------
 
@@ -94,7 +129,6 @@ FORMATTING RULES
 - Sparse emoji — at most 3-4 in the whole post, placed at section pivots
   (title, one hook moment, CTA), never mid-sentence for decoration.
 - No em-dash-heavy corporate cadence. No "In today's fast-paced world."
-- Total length: 120-220 words in the body, excluding hashtags.
 - Never use the words "leverage," "seamless," "robust," "cutting-edge," "game-changing,"
   or "unlock" — these read as AI-generated and Anurag avoids them everywhere.
 
@@ -116,10 +150,13 @@ Return ONLY this JSON, no preamble, no markdown fences:
 {
   "mode": "concept_explainer" | "debugging_story",
   "title": "string, the punchy opening title line with its emoji",
-  "body": "string, the full post body with \\n\\n between paragraphs, NOT including the title or hashtags",
+  "body": "string, the full post body with \\n\\n between paragraphs, NOT including the title or hashtags. Length must fall between ${minCharacters} and ${maxCharacters} characters per the LENGTH section above.",
   "hashtags": ["#Tag1", "#Tag2", "..."]
 }
 `.trim();
+}
+
+export const LINKEDIN_POST_PROMPT = buildLinkedInPostPrompt();
 
 export const LINKEDIN_POST_STYLE_ANCHORS = `
 Reference examples of Anurag's actual past posts (for tone calibration only —

@@ -50,9 +50,11 @@ import {
 } from "../lib/generated-episode.ts";
 import {
   LINKEDIN_POST_MAX_CHARACTERS,
+  LINKEDIN_POST_MIN_LENGTH_RATIO,
   LINKEDIN_POST_PROMPT,
   LINKEDIN_POST_STYLE_ANCHORS,
   LINKEDIN_POST_SYSTEM_PROMPT,
+  buildLinkedInPostPrompt,
   generateLinkedInPost,
   linkedinPostSchema,
   linkedinPostPrompt,
@@ -875,7 +877,16 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   assert.match(LINKEDIN_POST_PROMPT, /MODE A: CONCEPT EXPLAINER/);
   assert.match(LINKEDIN_POST_PROMPT, /MODE B: BUILD-IN-PUBLIC DEBUGGING STORY/);
   assert.match(LINKEDIN_POST_PROMPT, /Exactly one dry joke or wink per post/);
-  assert.match(LINKEDIN_POST_PROMPT, /120-220 words/);
+  assert.equal(LINKEDIN_POST_MIN_LENGTH_RATIO, 0.35);
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /body must land between 1050 and 3000 characters/,
+  );
+  assert.doesNotMatch(LINKEDIN_POST_PROMPT, /120-220 words/);
+  assert.match(
+    buildLinkedInPostPrompt(2_000),
+    /body must land between 700 and 2000 characters/,
+  );
   assert.match(LINKEDIN_POST_STYLE_ANCHORS, /Cache Me If You Can!/);
   assert.ok(LINKEDIN_POST_SYSTEM_PROMPT.includes(LINKEDIN_POST_PROMPT));
   assert.ok(LINKEDIN_POST_SYSTEM_PROMPT.includes(LINKEDIN_POST_STYLE_ANCHORS));
