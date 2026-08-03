@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveVoiceSample } from "./local-voice";
 import {
+  chatterboxMaxTempoAdjustment,
   CHATTERBOX_TARGET_WORDS_PER_MINUTE,
   CHATTERBOX_TTS_DELIVERY_PROMPT,
   chatterboxTargetDurationSeconds,
@@ -26,6 +27,7 @@ type ChatterboxRequest = {
   targetWordsPerMinute: number;
   minWordsPerMinute: number;
   maxWordsPerMinute: number;
+  maxTempoAdjustment: number;
   generation: {
     repetitionPenalty: number;
     temperature: number;
@@ -83,6 +85,7 @@ export async function synthesizeChatterboxSpeechWithMetadata(
   const ffmpegCommand = process.env.LOCAL_FFMPEG_COMMAND || "ffmpeg";
   const ffprobeCommand = process.env.LOCAL_FFPROBE_COMMAND || "ffprobe";
   const wordsPerMinuteRange = chatterboxWordsPerMinuteRange();
+  const maxTempoAdjustment = chatterboxMaxTempoAdjustment();
   const request: ChatterboxRequest = {
     // Chatterbox Turbo is tuned for short voice-agent turns. Sentence-sized
     // segments prevent long-form narration from drifting into silence or
@@ -96,6 +99,7 @@ export async function synthesizeChatterboxSpeechWithMetadata(
     deliveryPrompt: CHATTERBOX_TTS_DELIVERY_PROMPT,
     targetWordsPerMinute: CHATTERBOX_TARGET_WORDS_PER_MINUTE,
     ...wordsPerMinuteRange,
+    maxTempoAdjustment,
     generation: {
       repetitionPenalty: 1.2,
       temperature: 0.8,
@@ -132,15 +136,10 @@ export async function synthesizeChatterboxSpeechWithMetadata(
         { maxBuffer: 1024 * 1024 },
       );
       const generatedDurationSeconds = Number.parseFloat(stdout.trim());
-      const configuredMaxAdjustment = Number.parseFloat(
-        process.env.CHATTERBOX_MAX_TEMPO_ADJUSTMENT || "0.15",
-      );
       const tempo = naturalNarrationTempo(
         generatedDurationSeconds,
         promptedDurationSeconds,
-        Number.isFinite(configuredMaxAdjustment)
-          ? configuredMaxAdjustment
-          : 0.15,
+        maxTempoAdjustment,
       );
       if (tempo !== null) {
         tempoFilter = ["-filter:a", `atempo=${tempo.toFixed(6)}`];

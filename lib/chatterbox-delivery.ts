@@ -41,6 +41,7 @@ Read naturally, as though recording a premium engineering podcast for developers
 export const CHATTERBOX_TARGET_WORDS_PER_MINUTE = 160;
 export const CHATTERBOX_MIN_WORDS_PER_MINUTE = 130;
 export const CHATTERBOX_MAX_WORDS_PER_MINUTE = 190;
+export const CHATTERBOX_MAX_TEMPO_ADJUSTMENT = 0.15;
 
 function configuredWordsPerMinute(
   value: string | undefined,
@@ -81,6 +82,21 @@ export function chatterboxWordsPerMinuteRange(
     );
   }
   return { minWordsPerMinute, maxWordsPerMinute };
+}
+
+export function chatterboxMaxTempoAdjustment(
+  value = process.env.CHATTERBOX_MAX_TEMPO_ADJUSTMENT,
+): number {
+  if (value === undefined || value.trim() === "") {
+    return CHATTERBOX_MAX_TEMPO_ADJUSTMENT;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(
+      "CHATTERBOX_MAX_TEMPO_ADJUSTMENT must be a non-negative number.",
+    );
+  }
+  return Math.min(CHATTERBOX_MAX_TEMPO_ADJUSTMENT, parsed);
 }
 
 export function chatterboxTargetDurationSeconds(

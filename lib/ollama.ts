@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import {
   countScriptWords,
+  episodeLengthAcceptanceRange,
   episodeLengthProfile,
 } from "./podcast-length";
 import {
@@ -811,8 +812,16 @@ export function planSectionExpansions(
   sections: PodcastSection[],
   wordRanges: SectionWordRange[],
   targetEpisodeWords: number,
+  preferredSectionIndexes: readonly number[] = [],
 ): SectionExpansionRequest[] {
-  const expansionPriority = [2, 3, 5, 4, 1, 6, 0];
+  const defaultExpansionPriority = [2, 3, 5, 4, 1, 6, 0];
+  const preferred = [...new Set(preferredSectionIndexes)].filter(
+    (index) => Number.isInteger(index) && index >= 0 && index < sections.length,
+  );
+  const expansionPriority = [
+    ...preferred,
+    ...defaultExpansionPriority.filter((index) => !preferred.includes(index)),
+  ];
   let remaining = Math.max(
     0,
     targetEpisodeWords - totalSectionWords(sections),
@@ -890,6 +899,7 @@ async function expandPodcastSection(
   sections: PodcastSection[],
   request: SectionExpansionRequest,
   podcastPlan: PodcastPlan,
+  rejectedEvidenceDetails: readonly string[] = [],
 ): Promise<PodcastSection> {
   const { sectionIndex, minAdditionalWords, maxAdditionalWords } = request;
   const sectionNumber = sectionIndex + 1;
@@ -908,6 +918,12 @@ async function expandPodcastSection(
         content: `CURRENT_SECTION = "${sectionPlan.promptTitle}"
 
 Write ${minAdditionalWords}–${maxAdditionalWords} new words for section ${sectionNumber}, "${sectionPlan.title}". Add distinct depth that is not already present in any section. Do not repeat, summarize, or paraphrase the existing narration. End with a complete sentence.
+
+EVIDENCE BOUNDARY:
+- Expand only an assigned fact or a supported idea already stated in this section.
+- Do not introduce a new trend, shift, hardware or infrastructure requirement, causal claim, entity, number, method, or result.
+- If the supplied evidence cannot support additional narration, return {"script":""}.
+${rejectedEvidenceDetails.length ? `- Never reintroduce these rejected claims or close paraphrases:\n${rejectedEvidenceDetails.map((detail) => `  - ${JSON.stringify(detail)}`).join("\n")}` : ""}
 
 The existing section already contains any required KernelZero opening or closing. Do not repeat "Welcome to KernelZero." or any of the fixed closing lines. Return only new material. For "What To Watch Next", the application will insert this material before the existing closing.
 
@@ -965,6 +981,10 @@ async function expandSectionsToEpisodeMinimum(
   wordRanges: SectionWordRange[],
   minimumEpisodeWords: number,
   podcastPlan: PodcastPlan,
+  options: {
+    preferredSectionIndexes?: readonly number[];
+    rejectedEvidenceDetails?: readonly string[];
+  } = {},
 ): Promise<PodcastSection[]> {
   let expanded = [...sections];
   const maximumEpisodeWords = wordRanges.reduce(
@@ -982,10 +1002,12 @@ async function expandSectionsToEpisodeMinimum(
 
   for (let round = 0; round < 2; round += 1) {
     if (totalSectionWords(expanded) >= minimumEpisodeWords) return expanded;
+    const wordsBeforeRound = totalSectionWords(expanded);
     const requests = planSectionExpansions(
       expanded,
       wordRanges,
       targetEpisodeWords,
+      options.preferredSectionIndexes,
     );
     if (!requests.length) break;
     const snapshot = expanded;
@@ -997,6 +1019,7 @@ async function expandSectionsToEpisodeMinimum(
         snapshot,
         request,
         podcastPlan,
+        options.rejectedEvidenceDetails,
       ),
     );
     expanded = [...expanded];
@@ -1004,6 +1027,7 @@ async function expandSectionsToEpisodeMinimum(
       expanded[request.sectionIndex] = additions[index];
     });
     expanded = removeSectionRepetition(expanded);
+    if (totalSectionWords(expanded) <= wordsBeforeRound) break;
   }
   return expanded;
 }
@@ -1608,31 +1632,70 @@ async function runPodcastCritics(
   };
 }
 
+function evidenceIssueFingerprint(
+  issue: PodcastEvidenceReviewIssue,
+): string {
+  return [
+    issue.sectionNumber,
+    issue.kind,
+    normalizedEvidenceSupportText(issue.unsupportedDetail),
+  ].join(":");
+}
+
+function finalEvidenceReviewError(
+  issue: PodcastEvidenceReviewIssue,
+): Error {
+  const excerpt = issue.unsupportedDetail
+    ? ` Unsupported excerpt: "${issue.unsupportedDetail.slice(0, 160)}".`
+    : "";
+  return new Error(
+    `Final evidence review failed in section ${issue.sectionNumber}: ${issue.problem}${excerpt}`,
+  );
+}
+
 async function reviewAndRepairSections(
   items: ContentItem[],
   sections: PodcastSection[],
   wordRanges: SectionWordRange[],
-  profileMinimumWords: number,
+  minimumAcceptedWords: number,
   podcastPlan: PodcastPlan,
 ): Promise<PodcastSection[]> {
   let current = sections;
-  const maxReviewRounds = 3;
-  for (let reviewRound = 0; reviewRound < maxReviewRounds; reviewRound += 1) {
+  const evidenceAttempts = new Map<string, number>();
+  const evidenceSectionAttempts = new Map<number, number>();
+  const rejectedEvidenceDetails: string[] = [];
+  const maxEvidenceAttemptsPerIssue = 2;
+  const maxEvidenceAttemptsPerSection = 3;
+  const maxEvidenceRepairBatches = 4;
+  const maxNarrativeRepairBatches = 2;
+  let evidenceRepairBatches = 0;
+  let narrativeRepairBatches = 0;
+
+  while (true) {
     const { evidence, narrative } = await runPodcastCritics(items, current);
-    if (!evidence.issues.length && !narrative.issues.length) return current;
-    if (reviewRound === maxReviewRounds - 1) {
-      if (evidence.issues.length) {
-        const issue = evidence.issues[0];
-        const excerpt = issue.unsupportedDetail
-          ? ` Unsupported excerpt: "${issue.unsupportedDetail.slice(0, 160)}".`
-          : "";
-        throw new Error(
-          `Final evidence review failed in section ${issue.sectionNumber}: ${issue.problem}${excerpt}`,
-        );
-      }
+    const narrativeIssues = narrativeRepairBatches < maxNarrativeRepairBatches
+      ? narrative.issues
+      : [];
+    if (!evidence.issues.length && !narrativeIssues.length) {
       // Narrative judgments can be subjective. High-confidence verbatim
       // overlap is still enforced by deterministic gates after this function.
       return removeSectionRepetition(current);
+    }
+
+    const exhaustedEvidenceIssue = evidence.issues.find((issue) =>
+      (evidenceAttempts.get(evidenceIssueFingerprint(issue)) ?? 0) >=
+        maxEvidenceAttemptsPerIssue ||
+      (evidenceSectionAttempts.get(issue.sectionNumber) ?? 0) >=
+        maxEvidenceAttemptsPerSection
+    );
+    if (exhaustedEvidenceIssue) {
+      throw finalEvidenceReviewError(exhaustedEvidenceIssue);
+    }
+    if (
+      evidence.issues.length &&
+      evidenceRepairBatches >= maxEvidenceRepairBatches
+    ) {
+      throw finalEvidenceReviewError(evidence.issues[0]);
     }
 
     const feedbackBySection = new Map<number, string[]>();
@@ -1643,7 +1706,7 @@ async function reviewAndRepairSections(
       );
       feedbackBySection.set(issue.sectionNumber, feedback);
     }
-    for (const issue of narrative.issues) {
+    for (const issue of narrativeIssues) {
       const feedback = feedbackBySection.get(issue.sectionNumber) ?? [];
       feedback.push(
         `Narrative: ${issue.problem} Repair: ${issue.instruction}`,
@@ -1676,18 +1739,45 @@ async function reviewAndRepairSections(
       repaired[sectionNumber - 1] = repairs[index];
     });
     current = removeSectionRepetition(repaired);
-    if (totalSectionWords(current) < profileMinimumWords) {
+
+    if (evidence.issues.length) {
+      evidenceRepairBatches += 1;
+      for (const issue of evidence.issues) {
+        const fingerprint = evidenceIssueFingerprint(issue);
+        evidenceAttempts.set(
+          fingerprint,
+          (evidenceAttempts.get(fingerprint) ?? 0) + 1,
+        );
+        if (!rejectedEvidenceDetails.includes(issue.unsupportedDetail)) {
+          rejectedEvidenceDetails.push(issue.unsupportedDetail);
+        }
+      }
+      for (const sectionNumber of new Set(
+        evidence.issues.map((issue) => issue.sectionNumber),
+      )) {
+        evidenceSectionAttempts.set(
+          sectionNumber,
+          (evidenceSectionAttempts.get(sectionNumber) ?? 0) + 1,
+        );
+      }
+    }
+    if (narrativeIssues.length) narrativeRepairBatches += 1;
+
+    if (totalSectionWords(current) < minimumAcceptedWords) {
       current = await expandSectionsToEpisodeMinimum(
         items,
         current,
         wordRanges,
-        profileMinimumWords,
+        minimumAcceptedWords,
         podcastPlan,
+        {
+          preferredSectionIndexes: sectionNumbers.map((number) => number - 1),
+          rejectedEvidenceDetails,
+        },
       );
       current = removeSectionRepetition(current);
     }
   }
-  return current;
 }
 
 export async function createStructuredPodcast(
@@ -1760,7 +1850,7 @@ export async function createStructuredPodcast(
     items,
     deduplicatedSections,
     wordRanges,
-    profile.minWords,
+    episodeLengthAcceptanceRange(episodeLength).minWords,
     podcastPlan,
   );
   return {

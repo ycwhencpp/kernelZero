@@ -41,6 +41,34 @@ def validate_speaking_rate(
         )
 
 
+def slow_fallback_floor_words_per_minute(
+    min_words_per_minute: float,
+    max_tempo_adjustment: float,
+) -> float:
+    """Lowest clear rate tolerated after retries for natural slow passages."""
+    return min_words_per_minute / (1.0 + max_tempo_adjustment)
+
+
+def should_prefer_slow_fallback(
+    candidate_words_per_minute: float,
+    current_words_per_minute: float | None,
+    min_words_per_minute: float,
+    max_tempo_adjustment: float,
+) -> bool:
+    """Keep the fastest bounded slow candidate; fast audio is never a fallback."""
+    fallback_floor = slow_fallback_floor_words_per_minute(
+        min_words_per_minute,
+        max_tempo_adjustment,
+    )
+    return (
+        fallback_floor <= candidate_words_per_minute < min_words_per_minute
+        and (
+            current_words_per_minute is None
+            or candidate_words_per_minute > current_words_per_minute
+        )
+    )
+
+
 def emit_segment_diagnostic(
     *,
     index: int,
@@ -125,6 +153,7 @@ def main() -> None:
     target_words_per_minute = request.get("targetWordsPerMinute")
     min_words_per_minute = request.get("minWordsPerMinute", 130)
     max_words_per_minute = request.get("maxWordsPerMinute", 190)
+    max_tempo_adjustment = request.get("maxTempoAdjustment", 0.15)
     generation = request.get("generation")
     if not isinstance(segments, list) or not segments:
         raise ValueError("Chatterbox needs at least one narration segment.")
@@ -150,8 +179,16 @@ def main() -> None:
         or float(max_words_per_minute) <= 0
     ):
         raise ValueError("Invalid maximum Chatterbox words-per-minute value.")
+    if (
+        isinstance(max_tempo_adjustment, bool)
+        or not isinstance(max_tempo_adjustment, (int, float))
+        or not math.isfinite(float(max_tempo_adjustment))
+        or not 0 <= float(max_tempo_adjustment) <= 0.15
+    ):
+        raise ValueError("Invalid maximum Chatterbox tempo adjustment.")
     min_words_per_minute = float(min_words_per_minute)
     max_words_per_minute = float(max_words_per_minute)
+    max_tempo_adjustment = float(max_tempo_adjustment)
     if min_words_per_minute >= max_words_per_minute:
         raise ValueError("Chatterbox minimum words per minute must be below the maximum.")
     if not min_words_per_minute <= float(target_words_per_minute) <= max_words_per_minute:
@@ -210,6 +247,7 @@ def main() -> None:
     for index, (cleaned_text, pause_ms) in enumerate(validated_segments):
         last_error = None
         generated = None
+        slow_fallback = None
         for attempt in range(3):
             seed = 42 + index * 17 + attempt
             torch.manual_seed(seed)
@@ -226,6 +264,20 @@ def main() -> None:
             )
             try:
                 validate_generated_audio(candidate, cleaned_text, model.sr)
+                if should_prefer_slow_fallback(
+                    words_per_minute,
+                    slow_fallback[5] if slow_fallback is not None else None,
+                    min_words_per_minute,
+                    max_tempo_adjustment,
+                ):
+                    slow_fallback = (
+                        candidate,
+                        attempt + 1,
+                        seed,
+                        duration,
+                        word_count,
+                        words_per_minute,
+                    )
                 validate_speaking_rate(
                     words_per_minute,
                     min_words_per_minute,
@@ -260,6 +312,31 @@ def main() -> None:
                     text=cleaned_text,
                     reason=str(error),
                 )
+        if generated is None and slow_fallback is not None:
+            (
+                generated,
+                fallback_attempt,
+                fallback_seed,
+                fallback_duration,
+                fallback_word_count,
+                fallback_words_per_minute,
+            ) = slow_fallback
+            emit_segment_diagnostic(
+                index=index,
+                attempt=fallback_attempt,
+                seed=fallback_seed,
+                duration=fallback_duration,
+                word_count=fallback_word_count,
+                words_per_minute=fallback_words_per_minute,
+                min_words_per_minute=min_words_per_minute,
+                max_words_per_minute=max_words_per_minute,
+                status="accepted_slow_fallback",
+                text=cleaned_text,
+                reason=(
+                    "Clear audio selected after retries as the fastest candidate "
+                    f"within the bounded {max_tempo_adjustment:.0%} slow-rate tolerance."
+                ),
+            )
         if generated is None:
             raise ValueError(
                 f"Chatterbox could not produce clear audio for chunk {index + 1}: {last_error}"

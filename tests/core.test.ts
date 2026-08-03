@@ -24,9 +24,11 @@ import {
 } from "../lib/narration-text.ts";
 import {
   CHATTERBOX_TARGET_WORDS_PER_MINUTE,
+  CHATTERBOX_MAX_TEMPO_ADJUSTMENT,
   CHATTERBOX_MIN_WORDS_PER_MINUTE,
   CHATTERBOX_MAX_WORDS_PER_MINUTE,
   CHATTERBOX_TTS_DELIVERY_PROMPT,
+  chatterboxMaxTempoAdjustment,
   chatterboxTargetDurationSeconds,
   chatterboxWordsPerMinuteRange,
 } from "../lib/chatterbox-delivery.ts";
@@ -698,6 +700,7 @@ test("Chatterbox uses the KernelZero delivery contract and a 160 WPM target", ()
     /Change or paraphrase the transcript/,
   );
   assert.equal(CHATTERBOX_TARGET_WORDS_PER_MINUTE, 160);
+  assert.equal(CHATTERBOX_MAX_TEMPO_ADJUSTMENT, 0.15);
   assert.equal(CHATTERBOX_MIN_WORDS_PER_MINUTE, 130);
   assert.equal(CHATTERBOX_MAX_WORDS_PER_MINUTE, 190);
   assert.deepEqual(chatterboxWordsPerMinuteRange("", ""), {
@@ -723,6 +726,13 @@ test("Chatterbox uses the KernelZero delivery contract and a 160 WPM target", ()
     60,
   );
   assert.equal(chatterboxTargetDurationSeconds(""), null);
+  assert.equal(chatterboxMaxTempoAdjustment(""), 0.15);
+  assert.equal(chatterboxMaxTempoAdjustment("0.1"), 0.1);
+  assert.equal(chatterboxMaxTempoAdjustment("0.4"), 0.15);
+  assert.throws(
+    () => chatterboxMaxTempoAdjustment("-0.1"),
+    /must be a non-negative number/,
+  );
 });
 
 test("macOS narration and duration correction preserve natural pacing", () => {
@@ -1480,6 +1490,7 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
   process.env.OLLAMA_PARALLELISM = "3";
   let writerCalls = 0;
   let expansionCalls = 0;
+  const expansionPrompts: string[] = [];
   let activeExpansions = 0;
   let peakExpansions = 0;
 
@@ -1530,6 +1541,7 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
       /Write \d+–\d+ new words for section/.test(user)
     ) {
       expansionCalls += 1;
+      expansionPrompts.push(user);
       activeExpansions += 1;
       peakExpansions = Math.max(peakExpansions, activeExpansions);
       const match = user.match(
@@ -1565,6 +1577,11 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
     assert.equal(expansionCalls, 5);
     assert.equal(peakExpansions, 3);
     assert.equal(countScriptWords(generated.script), 1_264);
+    assert.ok(
+      expansionPrompts.every((prompt) =>
+        prompt.includes("Do not introduce a new trend, shift, hardware")
+      ),
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
@@ -1572,12 +1589,14 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
   }
 });
 
-test("Ollama critics give a flagged section two precise repair attempts", async () => {
+test("Ollama critics repair a new evidence issue that appears on a late audit", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
   process.env.OLLAMA_PARALLELISM = "3";
   const sectionWords = [28, 53, 73, 77, 49, 77, 48];
   const unsupportedDetail = "invented cascade result";
+  const lateUnsupportedDetail =
+    "This trend highlights a shift toward specialized hardware for inference.";
   const writerCalls = Array.from({ length: 7 }, () => 0);
   const repairPrompts: string[] = [];
   let evidenceCalls = 0;
@@ -1622,12 +1641,21 @@ test("Ollama critics give a flagged section two precise repair attempts", async 
       const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
       writerCalls[sectionNumber - 1] += 1;
       const revision = writerCalls[sectionNumber - 1];
-      if (sectionNumber === 3 && revision > 1) repairPrompts.push(user);
-      const includesUnsupportedDetail = sectionNumber === 3 && revision <= 2;
-      const reservedWords = includesUnsupportedDetail ? 3 : 0;
+      if (
+        (sectionNumber === 3 && revision > 1) ||
+        (sectionNumber === 6 && revision > 1)
+      ) {
+        repairPrompts.push(user);
+      }
+      const includedDetail = sectionNumber === 3 && revision <= 2
+        ? unsupportedDetail
+        : sectionNumber === 6 && revision === 1
+          ? lateUnsupportedDetail
+          : "";
+      const reservedWords = countScriptWords(includedDetail);
       return ndjson({
         script: [
-          ...(includesUnsupportedDetail ? [unsupportedDetail] : []),
+          ...(includedDetail ? [includedDetail] : []),
           ...Array.from(
             { length: sectionWords[sectionNumber - 1] - reservedWords },
             () => `section${sectionNumber}revision${revision}`,
@@ -1647,7 +1675,15 @@ test("Ollama critics give a flagged section two precise repair attempts", async 
               kind: "method_result",
               unsupportedDetail,
             }]
-          : [],
+          : evidenceCalls === 3
+            ? [{
+                sectionNumber: 6,
+                problem: "The hardware trend is not supported.",
+                instruction: "Remove the unsupported trend.",
+                kind: "method_result",
+                unsupportedDetail: lateUnsupportedDetail,
+              }]
+            : [],
       });
     }
     if (system.includes("podcast narrative editor")) {
@@ -1664,14 +1700,106 @@ test("Ollama critics give a flagged section two precise repair attempts", async 
       "brief",
     );
     assert.equal(countScriptWords(generated.script), 405);
-    assert.deepEqual(writerCalls, [1, 1, 3, 1, 1, 1, 1]);
-    assert.equal(evidenceCalls, 3);
-    assert.equal(narrativeCalls, 3);
-    assert.equal(repairPrompts.length, 2);
-    for (const prompt of repairPrompts) {
+    assert.deepEqual(writerCalls, [1, 1, 3, 1, 1, 2, 1]);
+    assert.equal(evidenceCalls, 4);
+    assert.equal(narrativeCalls, 4);
+    assert.equal(repairPrompts.length, 3);
+    for (const prompt of repairPrompts.slice(0, 2)) {
       assert.match(prompt, /Evidence \(method_result\)/);
       assert.match(prompt, /Exact flagged excerpt: "invented cascade result"/);
     }
+    assert.match(
+      repairPrompts[2],
+      /Exact flagged excerpt: "This trend highlights a shift toward specialized hardware for inference\."/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
+test("Ollama stops after two repairs of the same evidence issue", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  process.env.OLLAMA_PARALLELISM = "3";
+  const sectionWords = [28, 53, 73, 77, 49, 77, 48];
+  const unsupportedDetail = "persistent unsupported claim";
+  const writerCalls = Array.from({ length: 7 }, () => 0);
+  let evidenceCalls = 0;
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      return ndjson({
+        title: "Bounded evidence repair",
+        dek: "Persistent issues stop after a fixed budget.",
+        facts: [],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Section ${index + 1} focus.`,
+        })),
+      });
+    }
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
+      const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      writerCalls[sectionNumber - 1] += 1;
+      const reservedWords = sectionNumber === 3
+        ? countScriptWords(unsupportedDetail)
+        : 0;
+      return ndjson({
+        script: [
+          ...(sectionNumber === 3 ? [unsupportedDetail] : []),
+          ...Array.from(
+            { length: sectionWords[sectionNumber - 1] - reservedWords },
+            () => `section${sectionNumber}word`,
+          ),
+        ].join(" "),
+        claims: [],
+      });
+    }
+    if (system.includes("source-fabrication checker")) {
+      evidenceCalls += 1;
+      return ndjson({
+        issues: [{
+          sectionNumber: 3,
+          problem: "The claim remains unsupported.",
+          instruction: "Remove it.",
+          kind: "method_result",
+          unsupportedDetail,
+        }],
+      });
+    }
+    if (system.includes("podcast narrative editor")) {
+      return ndjson({ issues: [] });
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      createOllamaPodcast([item()], "daily_digest", "brief"),
+      /Final evidence review failed in section 3/,
+    );
+    assert.deepEqual(writerCalls, [1, 1, 3, 1, 1, 1, 1]);
+    assert.equal(evidenceCalls, 3);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
