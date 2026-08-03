@@ -45,11 +45,13 @@ import {
 } from "../lib/generated-episode.ts";
 import {
   createStructuredPodcast as createOllamaPodcast,
+  hasDanglingNarrationEnding,
   isActionableEvidenceIssue,
   isActionableRepetitionIssue,
   mapWithConcurrency,
   normalizePodcastPlan,
   planSectionExpansions,
+  trimNarrationToCompleteSentences,
 } from "../lib/ollama.ts";
 import { chunkForSpeech, generatePodcast } from "../lib/openai.ts";
 import {
@@ -981,6 +983,195 @@ test("Ollama evidence review accepts code-backed token capacity", () => {
     ),
     true,
   );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...issue, unsupportedDetail: "16 million tokens" },
+      [
+        item({
+          summary:
+            "The example initializes block_size = 16 # maximum sequence length before training.",
+        }),
+      ],
+      "In this scenario, the system can manage up to 16 million tokens.",
+    ),
+    true,
+  );
+});
+
+test("Ollama evidence review requires an excerpt from the flagged section", () => {
+  const baseIssue = {
+    sectionNumber: 4,
+    problem: "A result may be unsupported.",
+    instruction: "Remove the unsupported result.",
+    kind: "method_result" as const,
+  };
+
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "" },
+      [item()],
+      "The section contains only grounded material.",
+    ),
+    false,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "a result that is not in the draft" },
+      [item()],
+      "The section contains only grounded material.",
+    ),
+    false,
+  );
+});
+
+test("Ollama evidence review equates digit and spoken source numbers", () => {
+  const source = item({
+    summary:
+      "Angular Aria includes 12 UI patterns for accessible applications.",
+  });
+  const baseIssue = {
+    sectionNumber: 4,
+    problem: "The pattern count may be unsupported.",
+    instruction: "Use only the source-backed pattern count.",
+    kind: "exact_number" as const,
+  };
+
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "twelve UI patterns" },
+      [source],
+      "Angular Aria includes twelve UI patterns for accessible applications.",
+    ),
+    false,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "13 UI patterns" },
+      [source],
+      "Angular Aria includes 13 UI patterns for accessible applications.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "12 UI patterns" },
+      [
+        item({ summary: "Angular Aria does not include 12 UI patterns." }),
+      ],
+      "Angular Aria includes 12 UI patterns for accessible applications.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "12 UI patterns" },
+      [
+        item({ summary: "Angular Aria includes 12." }),
+        item({ summary: "UI patterns can improve accessibility." }),
+      ],
+      "Angular Aria includes 12 UI patterns for accessible applications.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "12 UI patterns" },
+      [item({ summary: "Angular Aria includes 12.5 UI patterns." })],
+      "Angular Aria includes 12 UI patterns for accessible applications.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      { ...baseIssue, unsupportedDetail: "twelve UI patterns" },
+      [item({ summary: "The baseline includes 12 UI patterns." })],
+      "Angular Aria includes twelve UI patterns.",
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      {
+        ...baseIssue,
+        unsupportedDetail: "Angular Aria includes twelve",
+      },
+      [item({ summary: "Angular Aria includes 12." })],
+      "Angular Aria includes twelve.",
+    ),
+    false,
+  );
+});
+
+test("Ollama evidence review accepts a code-backed character tokenizer", () => {
+  const unsupportedDetail =
+    "the tokenizer assigns one integer to each unique character";
+  const issue = {
+    sectionNumber: 3,
+    problem: "The tokenizer description may be inaccurate.",
+    instruction: "Describe only the supplied implementation.",
+    kind: "method_result" as const,
+    unsupportedDetail,
+  };
+  const section = `In the example, ${unsupportedDetail}.`;
+
+  assert.equal(
+    isActionableEvidenceIssue(
+      issue,
+      [
+        item({
+          summary:
+            "The code uses chars = sorted(set(text)) and stoi = {ch: i for i, ch in enumerate(chars)}.",
+        }),
+      ],
+      section,
+    ),
+    false,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      issue,
+      [item({ summary: "The code uses chars = sorted(set(text))." })],
+      section,
+    ),
+    true,
+  );
+  assert.equal(
+    isActionableEvidenceIssue(
+      {
+        ...issue,
+        unsupportedDetail:
+          "the tokenizer does not assign one integer to each unique character",
+      },
+      [
+        item({
+          summary:
+            "The code uses chars = sorted(set(text)) and stoi = {ch: i for i, ch in enumerate(chars)}.",
+        }),
+      ],
+      "The tokenizer does not assign one integer to each unique character.",
+    ),
+    true,
+  );
+});
+
+test("Ollama trimming never turns an arbitrary word slice into a sentence", () => {
+  const complete = `${Array.from(
+    { length: 27 },
+    (_, index) => `complete${index}`,
+  ).join(" ")}.`;
+  const overlong =
+    `${complete} This unsupported continuation keeps wandering and leading to a bad ending.`;
+
+  assert.equal(trimNarrationToCompleteSentences(overlong, 35), complete);
+  assert.equal(
+    trimNarrationToCompleteSentences(
+      "one two three four five six seven eight nine ten",
+      5,
+    ),
+    "one two three four five six seven eight nine ten",
+  );
+  assert.equal(hasDanglingNarrationEnding("The draft stops, leading to."), true);
+  assert.equal(hasDanglingNarrationEnding("This is what the evidence leads to."), false);
 });
 
 test("Ollama connection failures identify the local service", async () => {
@@ -1381,12 +1572,14 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
   }
 });
 
-test("Ollama critics repair only flagged sections before the final review", async () => {
+test("Ollama critics give a flagged section two precise repair attempts", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
   process.env.OLLAMA_PARALLELISM = "3";
   const sectionWords = [28, 53, 73, 77, 49, 77, 48];
+  const unsupportedDetail = "invented cascade result";
   const writerCalls = Array.from({ length: 7 }, () => 0);
+  const repairPrompts: string[] = [];
   let evidenceCalls = 0;
   let narrativeCalls = 0;
 
@@ -1428,22 +1621,31 @@ test("Ollama critics repair only flagged sections before the final review", asyn
     ) {
       const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
       writerCalls[sectionNumber - 1] += 1;
+      const revision = writerCalls[sectionNumber - 1];
+      if (sectionNumber === 3 && revision > 1) repairPrompts.push(user);
+      const includesUnsupportedDetail = sectionNumber === 3 && revision <= 2;
+      const reservedWords = includesUnsupportedDetail ? 3 : 0;
       return ndjson({
-        script: Array.from(
-          { length: sectionWords[sectionNumber - 1] },
-          () => `section${sectionNumber}revision${writerCalls[sectionNumber - 1]}`,
-        ).join(" "),
+        script: [
+          ...(includesUnsupportedDetail ? [unsupportedDetail] : []),
+          ...Array.from(
+            { length: sectionWords[sectionNumber - 1] - reservedWords },
+            () => `section${sectionNumber}revision${revision}`,
+          ),
+        ].join(" "),
         claims: [],
       });
     }
     if (system.includes("source-fabrication checker")) {
       evidenceCalls += 1;
       return ndjson({
-        issues: evidenceCalls === 1
+        issues: evidenceCalls <= 2
           ? [{
               sectionNumber: 3,
               problem: "One method detail is unsupported.",
               instruction: "Remove the unsupported method detail.",
+              kind: "method_result",
+              unsupportedDetail,
             }]
           : [],
       });
@@ -1462,9 +1664,14 @@ test("Ollama critics repair only flagged sections before the final review", asyn
       "brief",
     );
     assert.equal(countScriptWords(generated.script), 405);
-    assert.deepEqual(writerCalls, [1, 1, 2, 1, 1, 1, 1]);
-    assert.equal(evidenceCalls, 2);
-    assert.equal(narrativeCalls, 2);
+    assert.deepEqual(writerCalls, [1, 1, 3, 1, 1, 1, 1]);
+    assert.equal(evidenceCalls, 3);
+    assert.equal(narrativeCalls, 3);
+    assert.equal(repairPrompts.length, 2);
+    for (const prompt of repairPrompts) {
+      assert.match(prompt, /Evidence \(method_result\)/);
+      assert.match(prompt, /Exact flagged excerpt: "invented cascade result"/);
+    }
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
