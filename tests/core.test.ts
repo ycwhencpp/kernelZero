@@ -882,6 +882,14 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
     LINKEDIN_POST_PROMPT,
     /body must land between 1050 and 3000 characters/,
   );
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /what happened, why it's worth their time, how it[\s\S]*when\/where it fits/,
+  );
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /must end on the mandatory closing insight\/lesson line/,
+  );
   assert.doesNotMatch(LINKEDIN_POST_PROMPT, /120-220 words/);
   assert.match(
     buildLinkedInPostPrompt(2_000),
@@ -891,6 +899,10 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   assert.ok(LINKEDIN_POST_SYSTEM_PROMPT.includes(LINKEDIN_POST_PROMPT));
   assert.ok(LINKEDIN_POST_SYSTEM_PROMPT.includes(LINKEDIN_POST_STYLE_ANCHORS));
   assert.match(LINKEDIN_POST_SYSTEM_PROMPT, /only factual source/i);
+  assert.match(
+    LINKEDIN_POST_SYSTEM_PROMPT,
+    /closing lesson\/insight line is still required/,
+  );
 });
 
 test("LinkedIn post schema requests the four structured output fields", () => {

@@ -49,6 +49,12 @@ Never sound like:
 TWO POST MODES — pick the one that fits the source
 --------------------------------------------------
 
+Every post, regardless of mode, must let a reader who knows nothing about the source
+answer all four of these by the end: what happened, why it's worth their time, how it
+actually works or was solved, and when/where it fits (which project, which system, what
+triggered it). Skipping any of these is why a post reads as thin — it is not optional
+scaffolding, it is the actual content.
+
 MODE A: CONCEPT EXPLAINER
 Use when the source is educational — explaining how something works (a paper, a system
 design concept, an architecture).
@@ -56,12 +62,14 @@ design concept, an architecture).
 Shape:
 1. Catchy, punny title with a light emoji. Title should tease the concept without naming
    it too plainly. (e.g. "Game of Seconds: The Role of a CDN", "Cache Me If You Can!")
-2. Open with a surprising fact, a lineage/connection, or a one-line hook question.
+2. Open with a surprising fact, a lineage/connection, or a one-line hook question —
+   this is your "why should I care" beat. Do not skip straight to definitions.
 3. One aside of dry humor — a pop-culture near-miss, a wry parenthetical, an idiom
    ("Nah, not the Autobots one", "that's just the tip of the iceberg").
 4. A short "here's the shape of it" explanation using a → chain
-   (Step → Step → Step → Result), not prose paragraphs.
+   (Step → Step → Step → Result), not prose paragraphs. This is your "how" beat.
 5. One line on why the mechanism actually matters — what it replaced or removed.
+   This is your closing insight. It is mandatory in every post, with or without a CTA.
 6. CTA to the fuller writeup, phrased as an invitation, not a demand.
 7. Hashtags: 5-7, mixing broad (#AI, #SoftwareEngineering) and specific
    (#Transformers, #SystemDesign, #CDN).
@@ -73,17 +81,23 @@ an optimization, a wrong assumption corrected.
 Shape:
 1. Catchy title that reframes the bug/fix as something relatable, often with a wink at
    the symptom itself (e.g. "When Your AI Podcast Host Had Too Much Coffee").
-2. Open with the plain, human version of the problem — no jargon yet.
+2. Open with the plain, human version of the problem — no jargon yet. State what
+   system/project this happened in and what actually went wrong (the "when/where").
 3. Narrate the wrong turn first: "First instinct was X... turns out that was wrong."
    This is the emotional core — a competent person being wrong in a relatable way,
    not a highlight reel.
 4. Reveal the real root cause in plain language, THEN name the technical mechanism.
+   This is your "how" beat — it needs enough detail that a reader who wasn't there
+   understands the actual fix, not just that a fix happened.
 5. One dry, self-aware aside about the debugging process itself (a laugh at your own
    expense, not at the tool).
 6. A short → chain summarizing the actual fix (Measure → Reject outliers → Log → Tune).
 7. Close with a one-line "lesson" that generalizes past this one bug — this is the
-   line people screenshot. Keep it plain, not motivational-poster-ish.
-8. Light plug for the project the story came from, one sentence, no hard sell.
+   line people screenshot. Keep it plain, not motivational-poster-ish. This line is
+   mandatory in every post: write it even when the CTA/plug in step 8 is dropped for
+   lack of support. A post without this closing line is an incomplete post, not a safe one.
+8. Light plug for the project the story came from, one sentence, no hard sell — only
+   if the source supports it existing. If unsupported, omit this step only, not step 7.
 9. Hashtags: 5-7, mixing broad and specific to the actual tech involved.
 
 --------------------------------------------------
@@ -104,10 +118,11 @@ LENGTH — deduce it, don't default to it
 Do not aim for a fixed word count. Aim to give each real beat in the source enough
 room to land, then stop. Work it out in this order:
 
-1. List the distinct beats actually present in the source (e.g. for a debugging story:
-   the plain-language problem, the wrong turn, the real root cause, the fix, the lesson.
-   For a concept explainer: the hook, the mechanism, why it matters). A thin source might
-   only have 2-3 real beats — don't invent a fourth just to fill space.
+1. List the distinct beats actually present in the source, covering at minimum: the
+   what/why orientation, the how/mechanism, and the closing insight (see the mode
+   shapes above — every numbered step there is a candidate beat). A thin source might
+   only have 3-4 real beats — don't invent a fifth just to fill space, but don't drop
+   one of the required orientation/how/closing beats either.
 2. Give each beat one tight paragraph. If a beat is genuinely simple, its paragraph is
    short. If a beat needs an analogy or a → chain to land clearly, let it take that room.
 3. The total body must land between ${minCharacters} and ${maxCharacters} characters
@@ -138,7 +153,8 @@ FACTUAL GROUNDING
 
 - Every specific number, tool name, or outcome must come from the supplied source.
 - If the source doesn't give you a clean ending (bug still being tuned, fix unverified),
-  say that honestly — don't invent a resolved, tidy outcome.
+  say that honestly — don't invent a resolved, tidy outcome. Say what's still unresolved
+  as the closing line instead of omitting a closing line altogether.
 - Do not fabricate metrics to make the post punchier.
 
 --------------------------------------------------
@@ -150,7 +166,7 @@ Return ONLY this JSON, no preamble, no markdown fences:
 {
   "mode": "concept_explainer" | "debugging_story",
   "title": "string, the punchy opening title line with its emoji",
-  "body": "string, the full post body with \\n\\n between paragraphs, NOT including the title or hashtags. Length must fall between ${minCharacters} and ${maxCharacters} characters per the LENGTH section above.",
+  "body": "string, the full post body with \\n\\n between paragraphs, NOT including the title or hashtags. Length must fall between ${minCharacters} and ${maxCharacters} characters per the LENGTH section above, and must end on the mandatory closing insight/lesson line.",
   "hashtags": ["#Tag1", "#Tag2", "..."]
 }
 `.trim();
@@ -203,7 +219,10 @@ When a style or format instruction conflicts with factual grounding, factual gro
 Choose debugging_story only when the transcript explicitly establishes that Anurag personally
 experienced and worked through the problem. Never recast somebody else's experience as his.
 Never claim that a fuller writeup or project exists unless the transcript establishes it; omit
-that CTA or plug when unsupported. Do not introduce a tool name merely to create a hashtag.
+that CTA or plug when unsupported — but the closing lesson/insight line is still required
+even when the CTA and plug are both omitted. A post that ends right after the fix, with no
+generalized takeaway, is incomplete and must be corrected before returning it. Do not introduce
+a tool name merely to create a hashtag.
 
 Return only JSON matching the requested schema.
 `.trim();
