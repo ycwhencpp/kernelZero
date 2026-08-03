@@ -5,6 +5,12 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { resolveVoiceSample } from "./local-voice";
 import {
+  CHATTERBOX_TARGET_WORDS_PER_MINUTE,
+  CHATTERBOX_TTS_DELIVERY_PROMPT,
+  chatterboxTargetDurationSeconds,
+  chatterboxWordsPerMinuteRange,
+} from "./chatterbox-delivery";
+import {
   naturalNarrationTempo,
   prepareChatterboxSegments,
   type ChatterboxNarrationSegment,
@@ -16,6 +22,15 @@ type ChatterboxRequest = {
   segments: ChatterboxNarrationSegment[];
   samplePath: string;
   device: string;
+  deliveryPrompt: string;
+  targetWordsPerMinute: number;
+  minWordsPerMinute: number;
+  maxWordsPerMinute: number;
+  generation: {
+    repetitionPenalty: number;
+    temperature: number;
+    topP: number;
+  };
 };
 
 export type GeneratedChatterboxSpeech = {
@@ -33,6 +48,14 @@ function chatterboxDevice(): string {
 
 function chatterboxCacheDirectory(): string | undefined {
   return process.env.CHATTERBOX_CACHE_DIR ? resolve(process.env.CHATTERBOX_CACHE_DIR) : undefined;
+}
+
+function logChatterboxDiagnostics(output: unknown): void {
+  if (typeof output !== "string") return;
+  for (const outputLine of output.split(/[\r\n]+/)) {
+    const marker = outputLine.indexOf("[chatterbox] ");
+    if (marker >= 0) console.info(outputLine.slice(marker));
+  }
 }
 
 export async function assertChatterboxAvailable(): Promise<void> {
@@ -59,6 +82,7 @@ export async function synthesizeChatterboxSpeechWithMetadata(
   const workerPath = resolve("scripts/chatterbox_tts.py");
   const ffmpegCommand = process.env.LOCAL_FFMPEG_COMMAND || "ffmpeg";
   const ffprobeCommand = process.env.LOCAL_FFPROBE_COMMAND || "ffprobe";
+  const wordsPerMinuteRange = chatterboxWordsPerMinuteRange();
   const request: ChatterboxRequest = {
     // Chatterbox Turbo is tuned for short voice-agent turns. Sentence-sized
     // segments prevent long-form narration from drifting into silence or
@@ -66,6 +90,17 @@ export async function synthesizeChatterboxSpeechWithMetadata(
     segments: prepareChatterboxSegments(script, 260),
     samplePath: resolveVoiceSample(sampleKey),
     device: chatterboxDevice(),
+    // Turbo has no natural-language instruction channel. Keep the requested
+    // contract in the worker request and compile its supported behavior into
+    // segmentation, pauses, restrained native cues, sampling, and tempo.
+    deliveryPrompt: CHATTERBOX_TTS_DELIVERY_PROMPT,
+    targetWordsPerMinute: CHATTERBOX_TARGET_WORDS_PER_MINUTE,
+    ...wordsPerMinuteRange,
+    generation: {
+      repetitionPenalty: 1.2,
+      temperature: 0.8,
+      topP: 0.95,
+    },
   };
   if (request.segments.length === 0) {
     throw new Error("The narration script contains no speakable text.");
@@ -74,13 +109,23 @@ export async function synthesizeChatterboxSpeechWithMetadata(
   try {
     await writeFile(requestPath, JSON.stringify(request), "utf8");
     const cacheDirectory = chatterboxCacheDirectory();
-    await execFileAsync(pythonCommand(), [workerPath, requestPath, wavPath], {
-      env: { ...process.env, ...(cacheDirectory ? { HF_HOME: cacheDirectory } : {}) },
-      maxBuffer: 1024 * 1024,
-      timeout: Number(process.env.CHATTERBOX_TIMEOUT_MS || 30 * 60_000),
-    });
+    const { stderr: workerStderr } = await execFileAsync(
+      pythonCommand(),
+      [workerPath, requestPath, wavPath],
+      {
+        env: {
+          ...process.env,
+          ...(cacheDirectory ? { HF_HOME: cacheDirectory } : {}),
+        },
+        maxBuffer: 1024 * 1024,
+        timeout: Number(process.env.CHATTERBOX_TIMEOUT_MS || 30 * 60_000),
+      },
+    );
+    logChatterboxDiagnostics(workerStderr);
     let tempoFilter: string[] = [];
-    if (targetDurationSeconds && targetDurationSeconds > 0) {
+    const promptedDurationSeconds =
+      chatterboxTargetDurationSeconds(script) ?? targetDurationSeconds;
+    if (promptedDurationSeconds && promptedDurationSeconds > 0) {
       const { stdout } = await execFileAsync(
         ffprobeCommand,
         ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", wavPath],
@@ -88,14 +133,14 @@ export async function synthesizeChatterboxSpeechWithMetadata(
       );
       const generatedDurationSeconds = Number.parseFloat(stdout.trim());
       const configuredMaxAdjustment = Number.parseFloat(
-        process.env.CHATTERBOX_MAX_TEMPO_ADJUSTMENT || "0.08",
+        process.env.CHATTERBOX_MAX_TEMPO_ADJUSTMENT || "0.15",
       );
       const tempo = naturalNarrationTempo(
         generatedDurationSeconds,
-        targetDurationSeconds,
+        promptedDurationSeconds,
         Number.isFinite(configuredMaxAdjustment)
           ? configuredMaxAdjustment
-          : 0.08,
+          : 0.15,
       );
       if (tempo !== null) {
         tempoFilter = ["-filter:a", `atempo=${tempo.toFixed(6)}`];
@@ -124,6 +169,9 @@ export async function synthesizeChatterboxSpeechWithMetadata(
       durationSeconds,
     };
   } catch (error) {
+    if (error && typeof error === "object" && "stderr" in error) {
+      logChatterboxDiagnostics(error.stderr);
+    }
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`Chatterbox voice generation failed: ${detail}`);
   } finally {

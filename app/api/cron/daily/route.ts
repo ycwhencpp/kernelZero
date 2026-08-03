@@ -10,6 +10,7 @@ import { fetchFeed } from "../../../../lib/rss";
 import {
   addSource,
   createEpisode,
+  findAuthenticatedOwnerIdByEmail,
   getActiveVoiceProfile,
   getDashboardState,
   personalizeItems,
@@ -26,7 +27,19 @@ export async function GET(request: Request) {
     return Response.json({ error: "Invalid scheduler credential." }, { status: 401 });
   }
 
-  const ownerId = process.env.CRON_OWNER_EMAIL?.toLowerCase() || "local@kernelzero.local";
+  const ownerEmail =
+    process.env.CRON_OWNER_EMAIL?.trim().toLowerCase() ||
+    "local@kernelzero.local";
+  const ownerId = await findAuthenticatedOwnerIdByEmail(ownerEmail);
+  if (!ownerId) {
+    return Response.json(
+      {
+        error:
+          "CRON_OWNER_EMAIL must belong to an active account that has signed in at least once.",
+      },
+      { status: 409 },
+    );
+  }
   const dateParts = new Intl.DateTimeFormat("en", {
     timeZone: "Asia/Kolkata",
     year: "numeric",

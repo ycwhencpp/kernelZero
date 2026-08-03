@@ -1,5 +1,6 @@
-import { getSupabase, getSupabaseAuthAdmin } from "./supabase";
+import { getSupabase } from "./supabase";
 import { getSupabaseServer } from "./supabase-server";
+import { safeAvatarUrl } from "./profile-avatar";
 import type { AppRole, AppUser } from "./types";
 
 const roleRank: Record<AppRole, number> = {
@@ -17,40 +18,27 @@ export class AccessError extends Error {
   }
 }
 
-function normalizeRole(value: unknown): AppRole {
-  return value === "owner" || value === "editor" ? value : "viewer";
-}
-
-function ownerEmail(): string | null {
-  return (
-    process.env.APP_OWNER_EMAIL?.trim().toLowerCase() ||
-    process.env.CRON_OWNER_EMAIL?.trim().toLowerCase() ||
-    null
-  );
-}
-
 async function provisionProfile(user: {
   id: string;
   email: string;
   displayName: string;
 }): Promise<AppUser> {
   const db = getSupabase();
-  const configuredOwner = ownerEmail();
-  const isConfiguredOwner = user.email === configuredOwner;
-  const defaultWorkspaceOwner = configuredOwner || user.email;
 
   if (!db) {
     return {
       ...user,
       avatarUrl: null,
-      role: isConfiguredOwner ? "owner" : "viewer",
-      workspaceOwnerId: isConfiguredOwner ? user.email : defaultWorkspaceOwner,
+      role: "owner",
+      workspaceOwnerId: user.id,
     };
   }
 
   const { data: authProfile, error: authLookupError } = await db
     .from("profiles")
-    .select("id, email, display_name, avatar_url, role, workspace_owner_id")
+    .select(
+      "id, email, display_name, avatar_url, auth_user_id, role, workspace_owner_id",
+    )
     .eq("auth_user_id", user.id)
     .maybeSingle();
 
@@ -61,66 +49,85 @@ async function provisionProfile(user: {
     throw new Error(`Unable to load your role: ${authLookupError.message}`);
   }
 
-  const { data: emailProfile, error: emailLookupError } = authProfile
-    ? { data: null, error: null }
-    : await db
-        .from("profiles")
-        .select("id, email, display_name, avatar_url, role, workspace_owner_id")
-        .eq("email", user.email)
-        .maybeSingle();
-  if (
-    emailLookupError &&
-    !/column .* does not exist/i.test(emailLookupError.message)
-  ) {
-    throw new Error(`Unable to load your role: ${emailLookupError.message}`);
-  }
-  const existing = authProfile || emailProfile;
+  const existing = authProfile;
 
   if (existing && "role" in existing) {
-    const role = isConfiguredOwner ? "owner" : normalizeRole(existing.role);
-    const workspaceOwnerId =
-      (existing.workspace_owner_id as string | null) ||
-      (role === "owner" ? existing.id : defaultWorkspaceOwner);
-    const { error } = await db
-      .from("profiles")
-      .update({
-        auth_user_id: user.id,
-        display_name: existing.display_name || user.displayName,
-        role,
-        workspace_owner_id: workspaceOwnerId,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", existing.id);
-    if (error) throw new Error(`Unable to update your profile: ${error.message}`);
+    const profileId = String(existing.id);
+    const displayName = existing.display_name || user.displayName;
+    const updates: Record<string, unknown> = {};
+    if (existing.auth_user_id !== user.id) updates.auth_user_id = user.id;
+    if (existing.email !== user.email) updates.email = user.email;
+    if (!existing.display_name) updates.display_name = displayName;
+    if (existing.role !== "owner") updates.role = "owner";
+    if (existing.workspace_owner_id !== profileId) {
+      updates.workspace_owner_id = profileId;
+    }
+    if (Object.keys(updates).length > 0) {
+      updates.updated_at = new Date().toISOString();
+      const { error } = await db
+        .from("profiles")
+        .update(updates)
+        .eq("id", profileId);
+      if (error) {
+        throw new Error(`Unable to update your profile: ${error.message}`);
+      }
+    }
 
     return {
       id: user.id,
-      email: existing.email,
-      displayName: existing.display_name || user.displayName,
-      avatarUrl: existing.avatar_url,
-      role,
-      workspaceOwnerId,
+      email: user.email,
+      displayName,
+      avatarUrl: safeAvatarUrl(existing.avatar_url, user.id),
+      role: "owner",
+      workspaceOwnerId: profileId,
     };
   }
 
-  const role: AppRole = isConfiguredOwner ? "owner" : "viewer";
-  const workspaceOwnerId =
-    role === "owner" ? user.email : defaultWorkspaceOwner;
-  const { error } = await db.from("profiles").upsert({
-    id: user.email,
+  const profileId = user.id;
+  const { error } = await db.from("profiles").insert({
+    id: profileId,
     email: user.email,
     display_name: user.displayName,
     auth_user_id: user.id,
     avatar_url: null,
-    role,
-    workspace_owner_id: workspaceOwnerId,
+    role: "owner",
+    workspace_owner_id: profileId,
     timezone: "Asia/Kolkata",
     daily_budget_usd: 2,
     updated_at: new Date().toISOString(),
   });
   if (error) {
+    // Two first-render requests can provision the same immutable Auth UUID at
+    // once. Treat the committed matching row as success, but never claim by
+    // email or accept a row linked to a different Auth identity.
+    const { data: concurrentProfile, error: concurrentLookupError } = await db
+      .from("profiles")
+      .select(
+        "id, email, display_name, avatar_url, auth_user_id, role, workspace_owner_id",
+      )
+      .eq("id", profileId)
+      .eq("auth_user_id", user.id)
+      .maybeSingle();
+    if (concurrentLookupError) {
+      throw new Error(
+        `Unable to verify your profile: ${concurrentLookupError.message}`,
+      );
+    }
+    if (concurrentProfile) {
+      return {
+        id: user.id,
+        email: user.email,
+        displayName: concurrentProfile.display_name || user.displayName,
+        avatarUrl: safeAvatarUrl(concurrentProfile.avatar_url, user.id),
+        role: "owner",
+        workspaceOwnerId: String(concurrentProfile.id),
+      };
+    }
+
     throw new Error(
-      `Unable to create your profile. Run the latest Supabase migration: ${error.message}`,
+      /profiles_email_key|duplicate key.*email/i.test(error.message)
+        ? "This email belongs to a retired workspace and cannot be claimed automatically. Ask an administrator to remove or anonymize the retired profile."
+        : `Unable to create your profile. Run the latest Supabase migration: ${error.message}`,
     );
   }
 
@@ -129,8 +136,8 @@ async function provisionProfile(user: {
     email: user.email,
     displayName: user.displayName,
     avatarUrl: null,
-    role,
-    workspaceOwnerId,
+    role: "owner",
+    workspaceOwnerId: profileId,
   };
 }
 
@@ -184,24 +191,4 @@ export function authErrorResponse(error: unknown): Response | null {
     return Response.json({ error: error.message }, { status: error.status });
   }
   return null;
-}
-
-export async function updateUserRole(
-  email: string,
-  role: AppRole,
-): Promise<void> {
-  const admin = getSupabaseAuthAdmin();
-  if (!admin) throw new Error("Supabase Auth admin is not configured.");
-  const { data, error } = await admin.auth.admin.listUsers();
-  if (error) throw new Error(error.message);
-  const authUser = data.users.find(
-    (candidate) => candidate.email?.toLowerCase() === email.toLowerCase(),
-  );
-  if (!authUser) throw new Error("No Supabase Auth user has that email.");
-  const db = getSupabase();
-  const { error: profileError } = await db!
-    .from("profiles")
-    .update({ role, updated_at: new Date().toISOString() })
-    .eq("auth_user_id", authUser.id);
-  if (profileError) throw new Error(profileError.message);
 }

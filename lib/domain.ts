@@ -178,6 +178,32 @@ export function selectDigestItems(items: ContentItem[], limit = 5): ContentItem[
   return selected;
 }
 
+export function selectTopItemPerSource(
+  items: ContentItem[],
+  sourceIds: string[],
+): ContentItem[] {
+  const selectedSourceIds = new Set(sourceIds);
+  const bestBySource = new Map<string, ContentItem>();
+
+  for (const item of items) {
+    if (!item.sourceId || !selectedSourceIds.has(item.sourceId)) continue;
+
+    const current = bestBySource.get(item.sourceId);
+    if (
+      !current ||
+      item.score > current.score ||
+      (item.score === current.score &&
+        item.publishedAt.localeCompare(current.publishedAt) > 0)
+    ) {
+      bestBySource.set(item.sourceId, item);
+    }
+  }
+
+  return [...selectedSourceIds]
+    .map((sourceId) => bestBySource.get(sourceId))
+    .filter((item): item is ContentItem => Boolean(item));
+}
+
 export function hasBudgetForGeneration(
   spentUsd: number,
   budgetUsd: number,

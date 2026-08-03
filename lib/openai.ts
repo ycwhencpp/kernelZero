@@ -5,6 +5,7 @@ import * as ollama from "./ollama";
 import { CHATTERBOX_AUDIO_CONTENT_TYPE, synthesizeChatterboxSpeechWithMetadata } from "./chatterbox";
 import {
   countScriptWords,
+  episodeLengthAcceptanceRange,
   episodeLengthInstruction,
   episodeLengthProfile,
   estimateScriptDurationSeconds,
@@ -17,7 +18,6 @@ import {
   type PodcastDraft,
 } from "./podcast-schema";
 import { podcastSourcePacket, podcastVerificationSources } from "./podcast-source";
-import { simpleHash } from "./rss";
 import {
   findRepeatedParagraphs,
   repetitionFailureMessage,
@@ -30,6 +30,7 @@ import {
 import {
   openAiSpeechModelSupportsInstructions,
   PODCAST_AUDIO_DELIVERY_INSTRUCTION,
+  removeAiProductionDisclosures,
   withPodcastHostStyle,
 } from "./podcast-style";
 import type { Citation, ContentItem, Episode, EpisodeLength, EvidenceClaim } from "./types";
@@ -376,8 +377,9 @@ async function enforceEpisodeLength(
   }
   if (!scriptMatchesEpisodeLength(candidate.script, episodeLength)) {
     const profile = episodeLengthProfile(episodeLength);
+    const accepted = episodeLengthAcceptanceRange(episodeLength);
     throw new Error(
-      `The AI returned ${countScriptWords(candidate.script).toLocaleString("en-US")} script words; ${profile.minWords.toLocaleString("en-US")}–${profile.maxWords.toLocaleString("en-US")} are required for the selected ${profile.minutes}-minute episode.`,
+      `The AI returned ${countScriptWords(candidate.script).toLocaleString("en-US")} script words; the target is ${profile.minWords.toLocaleString("en-US")}–${profile.maxWords.toLocaleString("en-US")}, with a soft accepted range of ${accepted.minWords.toLocaleString("en-US")}–${accepted.maxWords.toLocaleString("en-US")} for the selected ${profile.minutes}-minute episode.`,
     );
   }
   return candidate;
@@ -429,6 +431,10 @@ export async function generatePodcast(
             episodeLength,
             options.regeneration,
           );
+  generated = {
+    ...generated,
+    script: removeAiProductionDisclosures(generated.script),
+  };
 
   // Verification can shorten a repaired draft, so re-check duration after each
   // evidence pass. A too-short script is never persisted or sent to TTS.
@@ -437,6 +443,10 @@ export async function generatePodcast(
     if (provider !== "ollama") {
       generated = await runEvidenceVerification(provider, generated, items, type, episodeLength);
     }
+    generated = {
+      ...generated,
+      script: removeAiProductionDisclosures(generated.script),
+    };
     const repetitionIssues = findRepeatedParagraphs(generated.script);
     if (
       scriptMatchesEpisodeLength(generated.script, episodeLength) &&
@@ -456,8 +466,16 @@ export async function generatePodcast(
         type,
         episodeLength,
       );
+      generated = {
+        ...generated,
+        script: removeAiProductionDisclosures(generated.script),
+      };
     }
   }
+  generated = {
+    ...generated,
+    script: removeAiProductionDisclosures(generated.script),
+  };
   if (!scriptMatchesEpisodeLength(generated.script, episodeLength)) {
     throw new Error("Evidence repair could not preserve the selected episode duration.");
   }
@@ -467,7 +485,7 @@ export async function generatePodcast(
   }
 
   const now = new Date().toISOString();
-  const episodeId = `episode-${simpleHash(`${generated.title}|${now}`)}`;
+  const episodeId = `episode-${crypto.randomUUID()}`;
   const citations: Citation[] = items.map((item, index) => ({
     label: String(index + 1),
     title: item.title,
@@ -477,7 +495,7 @@ export async function generatePodcast(
   let durationSeconds = estimatedDurationSeconds;
   let chapters = generated.chapters;
   const evidence: EvidenceClaim[] = generated.claims.map((claim, index) => ({
-    id: `evidence-${simpleHash(`${episodeId}|${index}|${claim.claim}`)}`,
+    id: `evidence-${crypto.randomUUID()}`,
     episodeId,
     contentItemId: items[Math.min(index, items.length - 1)].id,
     claim: claim.claim,
