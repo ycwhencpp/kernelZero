@@ -876,6 +876,35 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   assert.match(LINKEDIN_POST_PROMPT, /Anurag's personal LinkedIn presence/);
   assert.match(LINKEDIN_POST_PROMPT, /MODE A: CONCEPT EXPLAINER/);
   assert.match(LINKEDIN_POST_PROMPT, /MODE B: BUILD-IN-PUBLIC DEBUGGING STORY/);
+  assert.match(LINKEDIN_POST_PROMPT, /MODE C: INCIDENT \/ RESEARCH REPORT/);
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /reports a real event, incident, study, benchmark result, or research finding[\s\S]*→ Mode C/,
+  );
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /First line states the concrete fact:[\s\S]*who did what[\s\S]*actual[\s\S]*named entities/,
+  );
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /Mode C must work on two layers at the same time:[\s\S]*STORY:[\s\S]*TOPIC:/,
+  );
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /Preserve whether this was a real-world incident, a controlled[\s\S]*study, or a benchmark result/,
+  );
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /Give the available when\/where context from the source/,
+  );
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /why this specific event is notable[\s\S]*broader technical question, mechanism, or risk/,
+  );
+  assert.match(
+    LINKEDIN_POST_PROMPT,
+    /Can a reader say what happened[\s\S]*Can that reader also explain the underlying topic/,
+  );
   assert.match(LINKEDIN_POST_PROMPT, /Exactly one dry joke or wink per post/);
   assert.equal(LINKEDIN_POST_MIN_LENGTH_RATIO, 0.35);
   assert.match(
@@ -911,6 +940,10 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
     LINKEDIN_POST_SYSTEM_PROMPT,
     /Vague paraphrase of a specific fact is a factual-grounding failure/,
   );
+  assert.match(
+    LINKEDIN_POST_SYSTEM_PROMPT,
+    /finished post must tell the concrete story and explain its broader technical topic/,
+  );
 });
 
 test("LinkedIn post schema requests the four structured output fields", () => {
@@ -920,7 +953,11 @@ test("LinkedIn post schema requests the four structured output fields", () => {
     properties: {
       mode: {
         type: "string",
-        enum: ["concept_explainer", "debugging_story"],
+        enum: [
+          "concept_explainer",
+          "debugging_story",
+          "incident_research_report",
+        ],
       },
       title: { type: "string" },
       body: { type: "string" },
@@ -941,15 +978,20 @@ const validLinkedInDraft = {
 } as const;
 
 test("LinkedIn post output validation composes and normalizes a structured draft", () => {
+  const expected = {
+    post: [
+      "Cache Me If You Can! 🏃‍♂️",
+      "A request should not redo expensive work every time.\n\nRead → Cache → Reuse → Respond",
+      "#Caching #Backend #SystemDesign #Engineering #Performance",
+    ].join("\n\n"),
+  };
+  assert.deepEqual(normalizeLinkedInPost(validLinkedInDraft), expected);
   assert.deepEqual(
-    normalizeLinkedInPost(validLinkedInDraft),
-    {
-      post: [
-        "Cache Me If You Can! 🏃‍♂️",
-        "A request should not redo expensive work every time.\n\nRead → Cache → Reuse → Respond",
-        "#Caching #Backend #SystemDesign #Engineering #Performance",
-      ].join("\n\n"),
-    },
+    normalizeLinkedInPost({
+      ...validLinkedInDraft,
+      mode: "incident_research_report",
+    }),
+    expected,
   );
 });
 
@@ -1129,7 +1171,7 @@ test("Gemini and Ollama LinkedIn adapters use the shared structured contract", a
   const originalOllamaBaseUrl = process.env.OLLAMA_BASE_URL;
   const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
   const providerDraft = {
-    mode: "debugging_story",
+    mode: "incident_research_report",
     title: "The Cache Was Innocent 🔍",
     body: "First instinct was the cache. The transcript established a different cause.",
     hashtags: ["#Debugging", "#Backend", "#Caching", "#Engineering", "#Systems"],
