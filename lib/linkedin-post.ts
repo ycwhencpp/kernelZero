@@ -152,6 +152,11 @@ FACTUAL GROUNDING
 --------------------------------------------------
 
 - Every specific number, tool name, or outcome must come from the supplied source.
+- If the source names specific organizations, benchmarks, papers, or models, the post
+  must use the most load-bearing of those names directly (e.g. "Hugging Face," "the
+  ExploitGym benchmark," the specific frontier models tested). Do not launder a concrete,
+  named story into generic industry commentary — that reads as evasive, not as careful.
+  Vague paraphrase of a specific fact is a factual-grounding failure, not a safe fallback.
 - If the source doesn't give you a clean ending (bug still being tuned, fix unverified),
   say that honestly — don't invent a resolved, tidy outcome. Say what's still unresolved
   as the closing line instead of omitting a closing line altogether.
@@ -305,8 +310,14 @@ export function normalizeLinkedInPost(value: unknown): { post: string } {
   if (typeof record.title !== "string" || typeof record.body !== "string") {
     throw new Error("The AI returned an invalid LinkedIn post.");
   }
-  const title = record.title.replace(/\r\n?/g, "\n").trim();
-  const body = record.body.replace(/\r\n?/g, "\n").trim();
+  const title = record.title
+    .replace(/\r\n?/g, "\n")
+    .replace(/\\n/g, "\n")
+    .trim();
+  const body = record.body
+    .replace(/\r\n?/g, "\n")
+    .replace(/\\n/g, "\n")
+    .trim();
   if (!title || !body) throw new Error("The AI returned an empty LinkedIn post.");
 
   const hashtagCandidates = Array.isArray(record.hashtags)

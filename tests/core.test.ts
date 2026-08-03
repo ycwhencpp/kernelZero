@@ -903,6 +903,14 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
     LINKEDIN_POST_SYSTEM_PROMPT,
     /closing lesson\/insight line is still required/,
   );
+  assert.match(
+    LINKEDIN_POST_SYSTEM_PROMPT,
+    /must use the most load-bearing of those names directly/,
+  );
+  assert.match(
+    LINKEDIN_POST_SYSTEM_PROMPT,
+    /Vague paraphrase of a specific fact is a factual-grounding failure/,
+  );
 });
 
 test("LinkedIn post schema requests the four structured output fields", () => {
@@ -941,6 +949,21 @@ test("LinkedIn post output validation composes and normalizes a structured draft
         "A request should not redo expensive work every time.\n\nRead → Cache → Reuse → Respond",
         "#Caching #Backend #SystemDesign #Engineering #Performance",
       ].join("\n\n"),
+    },
+  );
+});
+
+test("LinkedIn post output converts literal newline escapes into line breaks", () => {
+  assert.deepEqual(
+    normalizeLinkedInPost({
+      ...validLinkedInDraft,
+      title: "Kernel Bugs\\nMeet AI 🔍",
+      body: "The benchmark used real kernel and V8 bugs.\\n\\nThe models found working exploits.",
+      hashtags: [],
+    }),
+    {
+      post:
+        "Kernel Bugs\nMeet AI 🔍\n\nThe benchmark used real kernel and V8 bugs.\n\nThe models found working exploits.",
     },
   );
 });
