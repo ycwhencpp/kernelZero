@@ -60,6 +60,25 @@ function logChatterboxDiagnostics(output: unknown): void {
   }
 }
 
+function chatterboxWorkerFailureDetail(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = typeof error.stderr === "string" ? error.stderr : "";
+    const workerError = stderr
+      .split(/[\r\n]+/)
+      .map((line) => line.trim())
+      .reverse()
+      .find((line) => /^(?:ValueError|RuntimeError):\s+/.test(line));
+    if (workerError) {
+      return workerError.replace(/^(?:ValueError|RuntimeError):\s+/, "");
+    }
+    return "The local Chatterbox worker exited before completing narration.";
+  }
+  if (error instanceof Error && !/[\r\n]/.test(error.message)) {
+    return error.message;
+  }
+  return "The local Chatterbox worker failed.";
+}
+
 export async function assertChatterboxAvailable(): Promise<void> {
   try {
     await access(pythonCommand());
@@ -171,7 +190,7 @@ export async function synthesizeChatterboxSpeechWithMetadata(
     if (error && typeof error === "object" && "stderr" in error) {
       logChatterboxDiagnostics(error.stderr);
     }
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = chatterboxWorkerFailureDetail(error);
     throw new Error(`Chatterbox voice generation failed: ${detail}`);
   } finally {
     await rm(workDir, { recursive: true, force: true });

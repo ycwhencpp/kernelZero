@@ -28,12 +28,28 @@ export function reconcileGeneratedEpisode<
 >(
   state: T,
   returnedEpisode: Episode,
+  options: { stateIsAuthoritative?: boolean } = {},
 ): { state: T; episode: Episode } {
   const storedEpisode = state.episodes.find(
     (episode) => episode.id === returnedEpisode.id,
   );
+  if (!storedEpisode && options.stateIsAuthoritative) {
+    throw new Error(
+      "The episode was removed while generation was finishing. Refresh before retrying.",
+    );
+  }
+  const returnedHasAudio = hasUsableAudioUrl(returnedEpisode.audioUrl);
   const episode = storedEpisode
-    ? { ...storedEpisode, ...returnedEpisode }
+    ? returnedHasAudio
+      ? {
+          ...storedEpisode,
+          audioUrl: returnedEpisode.audioUrl,
+          audioKey: returnedEpisode.audioKey,
+          audioBytes: returnedEpisode.audioBytes,
+          chapters: returnedEpisode.chapters,
+          durationSeconds: returnedEpisode.durationSeconds,
+        }
+      : storedEpisode
     : returnedEpisode;
   const hasStoredEpisode = Boolean(storedEpisode);
   const episodes = hasStoredEpisode

@@ -7,7 +7,9 @@ import torch
 
 from scripts.chatterbox_tts import (
     emit_segment_diagnostic,
+    fast_fallback_ceiling_words_per_minute,
     segment_speech_metrics,
+    should_prefer_fast_fallback,
     should_prefer_slow_fallback,
     slow_fallback_floor_words_per_minute,
     validate_speaking_rate,
@@ -56,6 +58,28 @@ class ChatterboxWorkerTests(unittest.TestCase):
         )
         self.assertFalse(
             should_prefer_slow_fallback(200.0, None, 130.0, 0.15)
+        )
+
+    def test_fast_fallback_selects_slowest_near_limit_candidate(self) -> None:
+        maximum = fast_fallback_ceiling_words_per_minute(190.0, 0.15)
+
+        self.assertAlmostEqual(maximum, 193.8, places=5)
+        selected = None
+        for rate in (192.9, 194.0, 190.1, 191.5):
+            if should_prefer_fast_fallback(rate, selected, 190.0, 0.15):
+                selected = rate
+
+        self.assertEqual(selected, 190.1)
+
+    def test_fast_fallback_never_accepts_in_range_or_wildly_fast_audio(self) -> None:
+        self.assertFalse(
+            should_prefer_fast_fallback(190.0, None, 190.0, 0.15)
+        )
+        self.assertFalse(
+            should_prefer_fast_fallback(193.9, None, 190.0, 0.15)
+        )
+        self.assertFalse(
+            should_prefer_fast_fallback(260.0, None, 190.0, 0.15)
         )
 
     def test_diagnostic_is_prefixed_compact_json_with_text(self) -> None:

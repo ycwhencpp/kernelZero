@@ -55,7 +55,7 @@ def should_prefer_slow_fallback(
     min_words_per_minute: float,
     max_tempo_adjustment: float,
 ) -> bool:
-    """Keep the fastest bounded slow candidate; fast audio is never a fallback."""
+    """Keep the fastest below-limit candidate that bounded speedup can repair."""
     fallback_floor = slow_fallback_floor_words_per_minute(
         min_words_per_minute,
         max_tempo_adjustment,
@@ -65,6 +65,35 @@ def should_prefer_slow_fallback(
         and (
             current_words_per_minute is None
             or candidate_words_per_minute > current_words_per_minute
+        )
+    )
+
+
+def fast_fallback_ceiling_words_per_minute(
+    max_words_per_minute: float,
+    max_tempo_adjustment: float,
+) -> float:
+    """Highest clear near-limit rate tolerated after all strict retries fail."""
+    near_limit_tolerance = min(0.02, max_tempo_adjustment)
+    return max_words_per_minute * (1.0 + near_limit_tolerance)
+
+
+def should_prefer_fast_fallback(
+    candidate_words_per_minute: float,
+    current_words_per_minute: float | None,
+    max_words_per_minute: float,
+    max_tempo_adjustment: float,
+) -> bool:
+    """Keep the slowest over-limit candidate within a narrow jitter margin."""
+    fallback_ceiling = fast_fallback_ceiling_words_per_minute(
+        max_words_per_minute,
+        max_tempo_adjustment,
+    )
+    return (
+        max_words_per_minute < candidate_words_per_minute <= fallback_ceiling
+        and (
+            current_words_per_minute is None
+            or candidate_words_per_minute < current_words_per_minute
         )
     )
 
@@ -248,6 +277,7 @@ def main() -> None:
         last_error = None
         generated = None
         slow_fallback = None
+        fast_fallback = None
         for attempt in range(3):
             seed = 42 + index * 17 + attempt
             torch.manual_seed(seed)
@@ -271,6 +301,20 @@ def main() -> None:
                     max_tempo_adjustment,
                 ):
                     slow_fallback = (
+                        candidate,
+                        attempt + 1,
+                        seed,
+                        duration,
+                        word_count,
+                        words_per_minute,
+                    )
+                if should_prefer_fast_fallback(
+                    words_per_minute,
+                    fast_fallback[5] if fast_fallback is not None else None,
+                    max_words_per_minute,
+                    max_tempo_adjustment,
+                ):
+                    fast_fallback = (
                         candidate,
                         attempt + 1,
                         seed,
@@ -335,6 +379,31 @@ def main() -> None:
                 reason=(
                     "Clear audio selected after retries as the fastest candidate "
                     f"within the bounded {max_tempo_adjustment:.0%} slow-rate tolerance."
+                ),
+            )
+        if generated is None and slow_fallback is None and fast_fallback is not None:
+            (
+                generated,
+                fallback_attempt,
+                fallback_seed,
+                fallback_duration,
+                fallback_word_count,
+                fallback_words_per_minute,
+            ) = fast_fallback
+            emit_segment_diagnostic(
+                index=index,
+                attempt=fallback_attempt,
+                seed=fallback_seed,
+                duration=fallback_duration,
+                word_count=fallback_word_count,
+                words_per_minute=fallback_words_per_minute,
+                min_words_per_minute=min_words_per_minute,
+                max_words_per_minute=max_words_per_minute,
+                status="accepted_fast_fallback",
+                text=cleaned_text,
+                reason=(
+                    "Clear audio selected after retries as the slowest over-limit "
+                    "candidate within the bounded near-limit rate tolerance."
                 ),
             )
         if generated is None:

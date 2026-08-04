@@ -9,22 +9,57 @@ import {
   generatePodcast,
   resolveAiProvider,
 } from "../../../lib/openai";
-import { hasUsableAudioUrl } from "../../../lib/generated-episode";
+import {
+  hasUsableAudioUrl,
+  reconcileGeneratedEpisode,
+} from "../../../lib/generated-episode";
 import {
   createEpisode,
   findItems,
   getActiveVoiceProfile,
   getDashboardState,
   recordJob,
+  replaceEpisodeAudio,
 } from "../../../lib/store";
 import { normalizeEpisodeLength } from "../../../lib/podcast-length";
 import {
   episodeSourceItemIds,
   parsePodcastRegenerationContext,
 } from "../../../lib/podcast-regeneration";
-import type { Episode, EpisodeLength } from "../../../lib/types";
+import type {
+  DashboardState,
+  Episode,
+  EpisodeLength,
+  EvidenceClaim,
+} from "../../../lib/types";
 
 export const dynamic = "force-dynamic";
+
+const NARRATION_RETRY_MESSAGE =
+  "Narration could not be completed, but the evidence-checked draft was saved.";
+
+function reconcileEpisodeCheckpoint(
+  state: DashboardState,
+  episode: Episode,
+  evidence: EvidenceClaim[],
+  stateIsAuthoritative = false,
+): { episode: Episode; state: DashboardState } {
+  const reconciled = reconcileGeneratedEpisode(state, episode, {
+    stateIsAuthoritative,
+  });
+  return {
+    episode: reconciled.episode,
+    state: {
+      ...reconciled.state,
+      evidence: [
+        ...evidence,
+        ...reconciled.state.evidence.filter(
+          (claim) => claim.episodeId !== episode.id,
+        ),
+      ],
+    },
+  };
+}
 
 export async function POST(request: Request) {
   const jobId = `job-generate-${Date.now()}`;
@@ -145,63 +180,210 @@ export async function POST(request: Request) {
       status: "running",
       provider: aiProviderLabel(provider),
     });
-    const generated = await generatePodcast(items, type, {
-      includeAudio: needsAudio,
-      voiceProfile,
-      episodeLength: normalizeEpisodeLength(body.episodeLength ?? state.settings.episodeLength),
-      regeneration,
-    });
+    let checkpointedEpisode: Episode | null = null;
+    let checkpointedEvidence: EvidenceClaim[] = [];
+    let checkpointProvider: "openai" | "gemini" | "ollama" | null = null;
+    const recoverNarrationFailure = async (
+      savedEpisode: Episode,
+      savedEvidence: EvidenceClaim[],
+      failedProvider: "openai" | "gemini" | "ollama",
+      narrationError: unknown,
+    ): Promise<Response> => {
+      const internalError = narrationError instanceof Error
+        ? narrationError.message
+        : String(narrationError);
+      console.error(
+        `[generate] job=${jobId} narration failed after draft checkpoint: ${internalError}`,
+      );
+      try {
+        await recordJob(ownerId, {
+          id: jobId,
+          stage: "Podcast narration",
+          status: "failed",
+          provider: aiProviderLabel(failedProvider),
+          costUsd: estimatedCostUsd,
+          error: internalError,
+        });
+      } catch (jobError) {
+        console.error(
+          `[generate] job=${jobId} could not record narration failure:`,
+          jobError,
+        );
+      }
+      let checkpointedState = state;
+      let stateIsAuthoritative = false;
+      try {
+        checkpointedState = await getDashboardState(ownerId);
+        stateIsAuthoritative = true;
+      } catch (stateError) {
+        console.error(
+          `[generate] job=${jobId} saved its draft, but the dashboard reread failed:`,
+          stateError,
+        );
+      }
+      const reconciled = reconcileEpisodeCheckpoint(
+        checkpointedState,
+        savedEpisode,
+        savedEvidence,
+        stateIsAuthoritative,
+      );
+      return Response.json({
+        episode: reconciled.episode,
+        provider: failedProvider,
+        state: reconciled.state,
+        audioError: NARRATION_RETRY_MESSAGE,
+      });
+    };
+
+    let generated: Awaited<ReturnType<typeof generatePodcast>>;
+    try {
+      generated = await generatePodcast(items, type, {
+        includeAudio: needsAudio,
+        voiceProfile,
+        episodeLength: normalizeEpisodeLength(body.episodeLength ?? state.settings.episodeLength),
+        regeneration,
+        onDraftReady: async (checkpoint) => {
+          if (sourceEpisode) {
+            checkpoint.episode.generation = sourceEpisode.generation + 1;
+          }
+          const savedDraft = await createEpisode(
+            ownerId,
+            checkpoint.episode,
+            checkpoint.evidence,
+          );
+          checkpointedEpisode = {
+            ...savedDraft,
+            citations: savedDraft.citations.map((citation) => ({ ...citation })),
+            chapters: savedDraft.chapters.map((chapter) => ({ ...chapter })),
+          };
+          checkpointedEvidence = checkpoint.evidence;
+          checkpointProvider = checkpoint.provider;
+        },
+      });
+    } catch (narrationError) {
+      if (needsAudio && checkpointedEpisode && checkpointProvider) {
+        return recoverNarrationFailure(
+          checkpointedEpisode,
+          checkpointedEvidence,
+          checkpointProvider,
+          narrationError,
+        );
+      }
+      throw narrationError;
+    }
+
     if (needsAudio && (!generated.audio || generated.audio.byteLength === 0)) {
+      if (checkpointedEpisode && checkpointProvider) {
+        return recoverNarrationFailure(
+          checkpointedEpisode,
+          checkpointedEvidence,
+          checkpointProvider,
+          new Error("Audio was requested, but the narrator returned no audio data."),
+        );
+      }
       throw new Error(
         "Audio was requested, but the narrator returned no audio data.",
       );
     }
-    if (sourceEpisode) {
-      generated.episode.generation = sourceEpisode.generation + 1;
+
+    let episode = generated.episode;
+    if (generated.audio) {
+      try {
+        episode = await replaceEpisodeAudio(
+          ownerId,
+          generated.episode,
+          generated.audio,
+          generated.audioContentType ?? undefined,
+          generated.episode.durationSeconds,
+        );
+        if (needsAudio && !hasUsableAudioUrl(episode.audioUrl)) {
+          throw new Error(
+            "Audio was generated, but it could not be stored with the episode.",
+          );
+        }
+      } catch (audioStorageError) {
+        if (checkpointedEpisode && checkpointProvider) {
+          return recoverNarrationFailure(
+            checkpointedEpisode,
+            checkpointedEvidence,
+            checkpointProvider,
+            audioStorageError,
+          );
+        }
+        throw audioStorageError;
+      }
     }
-    const episode = await createEpisode(
-      ownerId,
-      generated.episode,
+
+    let refreshedState = state;
+    let stateIsAuthoritative = false;
+    try {
+      refreshedState = await getDashboardState(ownerId);
+      stateIsAuthoritative = true;
+    } catch (stateError) {
+      console.error(
+        `[generate] job=${jobId} stored its episode, but the dashboard reread failed:`,
+        stateError,
+      );
+    }
+    const reconciled = reconcileEpisodeCheckpoint(
+      refreshedState,
+      episode,
       generated.evidence,
-      generated.audio,
-      new URL(request.url).origin,
-      generated.audioContentType ?? undefined,
+      stateIsAuthoritative,
     );
-    if (needsAudio && !hasUsableAudioUrl(episode.audioUrl)) {
-      throw new Error(
-        "Audio was generated, but it could not be stored with the episode.",
+    const storedEpisode = reconciled.episode;
+    refreshedState = reconciled.state;
+    let responseState = refreshedState;
+    try {
+      const completedAt = new Date().toISOString();
+      const stage = type === "daily_digest" ? "Daily digest" : "Deep-dive podcast";
+      const providerLabel = aiProviderLabel(generated.provider);
+      await recordJob(ownerId, {
+        id: jobId,
+        stage,
+        status: "completed",
+        provider: providerLabel,
+        costUsd: estimatedCostUsd,
+      });
+      const previousJob = refreshedState.jobs.find(
+        (candidate) => candidate.id === jobId,
+      );
+      const completedJob = {
+        id: jobId,
+        stage,
+        status: "completed" as const,
+        provider: providerLabel,
+        costUsd: estimatedCostUsd,
+        startedAt: previousJob?.startedAt ?? completedAt,
+        completedAt,
+      };
+      responseState = {
+        ...refreshedState,
+        jobs: [
+          completedJob,
+          ...refreshedState.jobs.filter((candidate) => candidate.id !== jobId),
+        ],
+        stats: {
+          ...refreshedState.stats,
+          dailySpendUsd:
+            refreshedState.stats.dailySpendUsd -
+            (previousJob?.costUsd ?? 0) +
+            estimatedCostUsd,
+        },
+      };
+    } catch (jobError) {
+      // The episode and its audio are already durable. A bookkeeping outage
+      // must not turn a successful generation into a retry/duplicate episode.
+      console.error(
+        `[generate] job=${jobId} completed, but final job status could not be recorded:`,
+        jobError,
       );
     }
-    const refreshedState = await getDashboardState(ownerId);
-    const storedEpisode = refreshedState.episodes.find(
-      (candidate) => candidate.id === episode.id,
-    );
-    if (!storedEpisode) {
-      throw new Error(
-        "The generated episode could not be found after it was stored.",
-      );
-    }
-    if (
-      needsAudio &&
-      (!hasUsableAudioUrl(storedEpisode.audioUrl) ||
-        storedEpisode.audioUrl !== episode.audioUrl)
-    ) {
-      throw new Error(
-        "The stored episode does not reference the generated audio.",
-      );
-    }
-    await recordJob(ownerId, {
-      id: jobId,
-      stage: type === "daily_digest" ? "Daily digest" : "Deep-dive podcast",
-      status: "completed",
-      provider: aiProviderLabel(generated.provider),
-      costUsd: estimatedCostUsd,
-    });
 
     return Response.json({
       episode: storedEpisode,
       provider: generated.provider,
-      state: refreshedState,
+      state: responseState,
     });
   } catch (error) {
     const errorMessage = error instanceof Error

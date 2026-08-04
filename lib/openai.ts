@@ -1,4 +1,10 @@
-import { aiProviderLabel, estimatedGenerationCostUsd, resolveAiProvider } from "./ai-config";
+import {
+  aiProviderLabel,
+  estimatedAudioCostUsd,
+  estimatedGenerationCostUsd,
+  resolveAiProvider,
+} from "./ai-config";
+import { encodedAudioDurationSeconds } from "./audio-duration";
 import { EVIDENCE_VERIFICATION_PROMPT } from "./evidence-verification";
 import * as gemini from "./gemini";
 import * as ollama from "./ollama";
@@ -59,6 +65,17 @@ export type PodcastPackage = {
   audio: ArrayBuffer | null;
   audioContentType: string | null;
   provider: "openai" | "gemini" | "ollama";
+};
+
+export type PodcastDraftCheckpoint = Pick<
+  PodcastPackage,
+  "episode" | "evidence" | "provider"
+>;
+
+export type PodcastAudioResult = {
+  audio: ArrayBuffer;
+  audioContentType: string;
+  durationSeconds: number;
 };
 
 function runtimeEnv(): RuntimeEnv {
@@ -447,6 +464,8 @@ export async function generatePodcast(
     voiceProfile?: ActiveVoiceProfile | null;
     episodeLength?: EpisodeLength;
     regeneration?: PodcastRegenerationContext | null;
+    episodeId?: string;
+    onDraftReady?: (checkpoint: PodcastDraftCheckpoint) => Promise<void>;
   } = {},
 ): Promise<PodcastPackage> {
   if (!items.length) throw new Error("At least one source is required.");
@@ -539,7 +558,8 @@ export async function generatePodcast(
   }
 
   const now = new Date().toISOString();
-  const episodeId = `episode-${crypto.randomUUID()}`;
+  const episodeId = options.episodeId?.trim() ||
+    `episode-${crypto.randomUUID()}`;
   const citations: Citation[] = items.map((item, index) => ({
     label: String(index + 1),
     title: item.title,
@@ -558,15 +578,41 @@ export async function generatePodcast(
     confidence: normalizeEvidenceConfidence(claim.confidence),
     location: claim.location,
   }));
+  const episode: Episode = {
+    id: episodeId,
+    contentItemId: type === "daily_digest" ? undefined : items[0].id,
+    type,
+    title: generated.title,
+    dek: generated.dek,
+    script: generated.script,
+    showNotes: generated.showNotes,
+    transcript: generated.script,
+    citations,
+    chapters,
+    audioUrl: null,
+    durationSeconds,
+    status: "needs_approval",
+    publishedAt: null,
+    immutableGuid: `kernelzero:${episodeId}`,
+    generation: 1,
+    createdAt: now,
+  };
+
+  // Persist the completed, validated text before narration begins. Callers use
+  // this checkpoint to make an expensive draft recoverable when TTS fails.
+  await options.onDraftReady?.({ episode, evidence, provider });
+
   let audio: ArrayBuffer | null = null;
   let audioContentType: string | null = null;
-  if (options.includeAudio && options.voiceProfile?.active && options.voiceProfile.provider === "chatterbox") {
-    const speech = await synthesizeChatterboxSpeechWithMetadata(
+  if (options.includeAudio) {
+    const speech = await synthesizePodcastAudio(
       generated.script,
-      options.voiceProfile.sampleKey,
+      provider,
+      options.voiceProfile,
       estimatedDurationSeconds,
     );
     audio = speech.audio;
+    audioContentType = speech.audioContentType;
     durationSeconds = speech.durationSeconds;
     chapters = generated.chapters.map((chapter) => ({
       ...chapter,
@@ -578,38 +624,13 @@ export async function generatePodcast(
         ),
       ),
     }));
-    audioContentType = CHATTERBOX_AUDIO_CONTENT_TYPE;
-  } else if (options.includeAudio && provider === "openai") {
-    audio = await synthesizeSpeech(generated.script);
-    audioContentType = "audio/mpeg";
-  } else if (options.includeAudio && provider === "gemini") {
-    audio = await gemini.synthesizeSpeech(generated.script);
-    audioContentType = gemini.GEMINI_AUDIO_CONTENT_TYPE;
-  } else if (options.includeAudio && provider === "ollama") {
-    audio = await ollama.synthesizeSpeech(generated.script);
-    audioContentType = ollama.OLLAMA_AUDIO_CONTENT_TYPE;
   }
 
+  episode.chapters = chapters;
+  episode.durationSeconds = durationSeconds;
+
   return {
-    episode: {
-      id: episodeId,
-      contentItemId: type === "daily_digest" ? undefined : items[0].id,
-      type,
-      title: generated.title,
-      dek: generated.dek,
-      script: generated.script,
-      showNotes: generated.showNotes,
-      transcript: generated.script,
-      citations,
-      chapters,
-      audioUrl: null,
-      durationSeconds,
-      status: "needs_approval",
-      publishedAt: null,
-      immutableGuid: `kernelzero:${episodeId}`,
-      generation: 1,
-      createdAt: now,
-    },
+    episode,
     evidence,
     audio,
     audioContentType,
@@ -617,4 +638,59 @@ export async function generatePodcast(
   };
 }
 
-export { aiProviderLabel, estimatedGenerationCostUsd, resolveAiProvider };
+export async function synthesizePodcastAudio(
+  script: string,
+  provider: PodcastPackage["provider"] | null,
+  voiceProfile: ActiveVoiceProfile | null | undefined,
+  targetDurationSeconds = estimateScriptDurationSeconds(script),
+): Promise<PodcastAudioResult> {
+  if (voiceProfile?.active && voiceProfile.provider === "chatterbox") {
+    const speech = await synthesizeChatterboxSpeechWithMetadata(
+      script,
+      voiceProfile.sampleKey,
+      targetDurationSeconds,
+    );
+    return {
+      audio: speech.audio,
+      audioContentType: CHATTERBOX_AUDIO_CONTENT_TYPE,
+      durationSeconds: speech.durationSeconds,
+    };
+  }
+  if (!provider) {
+    throw new Error(
+      "No audio provider is configured. Choose an active local Chatterbox voice or configure an AI provider.",
+    );
+  }
+  if (provider === "openai") {
+    const audio = await synthesizeSpeech(script);
+    const audioContentType = "audio/mpeg";
+    return {
+      audio,
+      audioContentType,
+      durationSeconds: encodedAudioDurationSeconds(audio, audioContentType),
+    };
+  }
+  if (provider === "gemini") {
+    const audio = await gemini.synthesizeSpeech(script);
+    const audioContentType = gemini.GEMINI_AUDIO_CONTENT_TYPE;
+    return {
+      audio,
+      audioContentType,
+      durationSeconds: encodedAudioDurationSeconds(audio, audioContentType),
+    };
+  }
+  const audio = await ollama.synthesizeSpeech(script);
+  const audioContentType = ollama.OLLAMA_AUDIO_CONTENT_TYPE;
+  return {
+    audio,
+    audioContentType,
+    durationSeconds: encodedAudioDurationSeconds(audio, audioContentType),
+  };
+}
+
+export {
+  aiProviderLabel,
+  estimatedAudioCostUsd,
+  estimatedGenerationCostUsd,
+  resolveAiProvider,
+};

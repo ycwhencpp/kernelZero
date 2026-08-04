@@ -247,6 +247,7 @@ export function DashboardClient({
         episode: Episode;
         provider: "openai" | "gemini" | "ollama";
         state: DashboardState;
+        audioError?: string;
       }>("/api/generate", {
         method: "POST",
         body: JSON.stringify(requestBody),
@@ -255,7 +256,9 @@ export function DashboardClient({
         payload.state,
         payload.episode,
       );
-      requireGeneratedAudio(generated.episode, requestBody.includeAudio);
+      if (!payload.audioError) {
+        requireGeneratedAudio(generated.episode, requestBody.includeAudio);
+      }
       setState(generated.state);
       setSelectedEpisodeId(generated.episode.id);
       setReviewReturnView("dashboard");
@@ -268,9 +271,11 @@ export function DashboardClient({
       );
       if (generated.episode.audioUrl) loadEpisodeAudio(generated.episode);
       notify(
-        regeneration
-          ? "Draft regenerated from the current version and is ready for review."
-          : "Evidence-checked script and local audio are ready for review.",
+        payload.audioError
+          ? `${payload.audioError} Use Generate Audio to retry.`
+          : regeneration
+            ? "Draft regenerated from the current version and is ready for review."
+            : "Evidence-checked script and local audio are ready for review.",
       );
     } catch (error) {
       notify(error instanceof Error ? error.message : "Generation failed.");

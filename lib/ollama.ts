@@ -170,6 +170,11 @@ function ollamaParallelism(): number {
     : 2;
 }
 
+function logOllamaDecision(stage: string, details: string): void {
+  if (process.env.OLLAMA_LOG_TIMINGS !== "true") return;
+  console.info(`[ollama] decision=${stage} ${details}`);
+}
+
 async function chatOnce(
   messages: OllamaMessage[],
   { format, maxOutputTokens, stage }: OllamaChatOptions,
@@ -495,11 +500,35 @@ export function normalizePodcastPlan(
   };
 }
 
+export function podcastPlanFactCardLimit(
+  sourceCount: number,
+  episodeLength: EpisodeLength,
+): number {
+  const episodeBaseline: Record<EpisodeLength, number> = {
+    brief: 12,
+    standard: 16,
+    deep: 20,
+  };
+  const episodeLimit: Record<EpisodeLength, number> = {
+    brief: 12,
+    standard: 18,
+    deep: 24,
+  };
+  const normalizedSourceCount = Math.max(1, Math.floor(sourceCount) || 1);
+  const sourceDepthBonus = Math.min(4, normalizedSourceCount - 1) * 2;
+  return Math.min(
+    episodeLimit[episodeLength],
+    episodeBaseline[episodeLength] + sourceDepthBonus,
+  );
+}
+
 async function createPodcastPlan(
   items: ContentItem[],
   episodeType: Episode["type"],
+  episodeLength: EpisodeLength,
   regeneration?: PodcastRegenerationContext | null,
 ): Promise<PodcastPlan> {
+  const factCardLimit = podcastPlanFactCardLimit(items.length, episodeLength);
   try {
     const content = await chat(
       [
@@ -512,7 +541,7 @@ async function createPodcastPlan(
           role: "user",
           content: `Create the title, one-sentence dek, and a compact editorial fact-ownership plan for a ${episodeType.replaceAll("_", " ")}.
 
-Produce no more than 12 source-grounded fact cards, using fewer when the sources do not support 12. Limit every fact statement to 25 words. Each fact must name one valid sourceNumber and exactly one sectionNumber. Do not assign detailed facts to sections 1, 2, or 7. Section 5 owns evidence limitations and publication status. Section 6 owns implications, not repeated findings.
+Produce no more than ${factCardLimit} source-grounded fact cards, using fewer when the sources do not support ${factCardLimit}. Limit every fact statement to 25 words. Each fact must name one valid sourceNumber and exactly one sectionNumber. Do not assign detailed facts to sections 1, 2, or 7. Section 5 owns evidence limitations and publication status. Section 6 owns implications, not repeated findings.
 
 Return exactly seven section entries, numbered 1 through 7, with each focus limited to 20 words. Never repeat a fact card or section entry.
 
@@ -674,10 +703,10 @@ async function createPodcastSection(
   let best: PodcastSection | null = draftToExpand;
   let previousStructuralFailure: "dangling" | "overlong" | null = null;
   const minimumSentences = Math.max(5, Math.ceil(minWords / 18));
-  // Temperature-zero retries reproduce the same under-length draft. Episode
-  // growth is handled by parallel addenda after all first-pass sections exist.
-  // A structural failure gets one changed-prompt retry because accepting it
-  // would either exceed the word ceiling or leave an unfinished transition.
+  const isFirstPass = draftToExpand === null && !repetitionFeedback.length;
+  // Each first-pass short section gets one changed-prompt, deficit-aware repair.
+  // Structural failures use the same bounded retry budget. The previous draft
+  // and failure state make the temperature-zero retry materially different.
   let maxAttempts = 1;
   const sectionNumber = plannedSection?.sectionNumber ??
     sectionPlans.findIndex((candidate) => candidate.title === plan.title) + 1;
@@ -688,6 +717,8 @@ async function createPodcastSection(
     (fact) => fact.sectionNumber !== sectionNumber,
   );
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const previousWords = countScriptWords(previous?.script ?? "");
+    const previousDeficit = Math.max(0, minWords - previousWords);
     const previousDraftInstruction = previous
       ? repetitionFeedback.length
         ? `TARGETED REVISION ATTEMPT ${attempt + 1}: Apply every revision item to this existing section while preserving its useful, supported material. Keep the revised script within ${minWords}–${maxWords} words and do not introduce facts owned by another section:\n${JSON.stringify(previous)}`
@@ -695,7 +726,7 @@ async function createPodcastSection(
           ? `STRUCTURE REPAIR ATTEMPT ${attempt + 1}: The previous draft ended with an unfinished transition. Rewrite its ending as a complete thought, without adding unsupported facts, and keep the whole script within ${minWords}–${maxWords} words:\n${JSON.stringify(previous)}`
           : previousStructuralFailure === "overlong"
             ? `STRUCTURE REPAIR ATTEMPT ${attempt + 1}: The previous draft exceeded the ${maxWords}-word ceiling without a usable complete-sentence boundary. Rewrite it as complete sentences within ${minWords}–${maxWords} words:\n${JSON.stringify(previous)}`
-        : `LENGTH REPAIR ATTEMPT ${attempt + 1}: The previous draft had only ${countScriptWords(previous.script)} words. Expand its useful material with distinct explanation specific to this section until the script reaches at least ${minWords} words and ${minimumSentences} sentences. Do not shorten it and do not add repetition:\n${JSON.stringify(previous)}`
+        : `LENGTH REPAIR ATTEMPT ${attempt + 1}: The previous draft had ${previousWords} words, a deficit of ${previousDeficit} words against the ${minWords}-word minimum. Return the complete revised section, preserving its useful supported material while adding at least ${previousDeficit} net new words of distinct explanation specific to this section. Reach ${minWords}–${maxWords} words and at least ${minimumSentences} sentences. Do not shorten it, repeat it verbatim, or add unsupported facts:\n${JSON.stringify(previous)}`
       : "";
     const userPrompt = `CURRENT_SECTION = "${plan.promptTitle}"
 
@@ -783,13 +814,20 @@ Return exactly one JSON object shaped as {"script":"complete narration here"}.`,
     if (words >= minWords && words <= maxWords && !hasDanglingEnding) {
       return candidate;
     }
-    if (
-      attempt === 0 &&
-      (hasDanglingEnding || rawWordCount > maxWords) &&
-      maxAttempts === 1
-    ) {
+    const needsFirstPassLengthRepair = isFirstPass && words < minWords;
+    if (attempt === 0 && maxAttempts === 1 && (
+      hasDanglingEnding || rawWordCount > maxWords || needsFirstPassLengthRepair
+    )) {
       maxAttempts = 2;
-      previousStructuralFailure = hasDanglingEnding ? "dangling" : "overlong";
+      previousStructuralFailure = hasDanglingEnding
+        ? "dangling"
+        : rawWordCount > maxWords
+          ? "overlong"
+          : null;
+      logOllamaDecision(
+        "section_retry",
+        `section=${sectionNumber} total_words=${words} deficit_words=${Math.max(0, minWords - words)} reason=${previousStructuralFailure ?? "under_length"}`,
+      );
     }
     if (
       repetitionFeedback.length ||
@@ -809,9 +847,9 @@ Return exactly one JSON object shaped as {"script":"complete narration here"}.`,
     COMPLETE_NARRATION_ENDING.test(bestScript) &&
     !hasDanglingNarrationEnding(bestScript)
   ) {
-    // Keep short but coherent source-grounded material. The episode-level
-    // expansion pass fills the deficit, and the strict duration gate still
-    // runs before anything is saved or narrated.
+    // The bounded first-pass repair has already run for an initially short
+    // section. Keep any remaining coherent source-grounded material so the
+    // episode-level expansion pass can fill the residual deficit.
     return best;
   }
   throw new Error(
@@ -931,6 +969,9 @@ async function expandPodcastSection(
   const assignedFacts = podcastPlan.facts.filter(
     (fact) => fact.sectionNumber === sectionNumber,
   );
+  const factsOwnedElsewhere = podcastPlan.facts.filter(
+    (fact) => fact.sectionNumber !== sectionNumber,
+  );
   const content = await chat(
     [
       {
@@ -944,8 +985,9 @@ async function expandPodcastSection(
 Write ${minAdditionalWords}–${maxAdditionalWords} new words for section ${sectionNumber}, "${sectionPlan.title}". Add distinct depth that is not already present in any section. Do not repeat, summarize, or paraphrase the existing narration. End with a complete sentence.
 
 EVIDENCE BOUNDARY:
-- Expand only an assigned fact or a supported idea already stated in this section.
-- Do not introduce a new trend, shift, hardware or infrastructure requirement, causal claim, entity, number, method, or result.
+- Expand an assigned fact, a supported idea already stated in this section, or a new detail whose exact substance is explicitly present in the supplied source packet and directly advances this section's assigned purpose.
+- Before using any new detail, verify internally which source number states it, but do not speak citation numbers in the narration. If no supplied source states it, omit it. Never infer a trend, shift, hardware or infrastructure requirement, causal claim, entity, number, method, or result merely to fill the requested length.
+- Do not use a source-grounded detail when the editorial plan assigns that detail to another section.
 - If the supplied evidence cannot support additional narration, return {"script":""}.
 ${rejectedEvidenceDetails.length ? `- Never reintroduce these rejected claims or close paraphrases:\n${rejectedEvidenceDetails.map((detail) => `  - ${JSON.stringify(detail)}`).join("\n")}` : ""}
 
@@ -958,6 +1000,11 @@ FACTS OWNED BY THIS SECTION:
 ${assignedFacts.length
   ? assignedFacts.map((fact) => `- ${fact.id} [source ${fact.sourceNumber}]: ${fact.statement}`).join("\n")
   : "- No detailed fact cards are assigned. Add only cautious explanation appropriate to this section."}
+
+FACTS RESERVED FOR OTHER SECTIONS — DO NOT USE:
+${factsOwnedElsewhere.length
+  ? factsOwnedElsewhere.map((fact) => `- ${fact.id} belongs to section ${fact.sectionNumber}: ${fact.statement}`).join("\n")
+  : "- None."}
 
 EXISTING SECTION:
 ${sections[sectionIndex].script.trim()}
@@ -1027,13 +1074,31 @@ async function expandSectionsToEpisodeMinimum(
   for (let round = 0; round < 2; round += 1) {
     if (totalSectionWords(expanded) >= minimumEpisodeWords) return expanded;
     const wordsBeforeRound = totalSectionWords(expanded);
+    const deficitBeforeRound = Math.max(
+      0,
+      minimumEpisodeWords - wordsBeforeRound,
+    );
     const requests = planSectionExpansions(
       expanded,
       wordRanges,
       targetEpisodeWords,
       options.preferredSectionIndexes,
     );
-    if (!requests.length) break;
+    if (!requests.length) {
+      logOllamaDecision(
+        "expansion",
+        `round=${round + 1} total_words=${wordsBeforeRound} deficit_words=${deficitBeforeRound} requested_words=0 accepted_words=0`,
+      );
+      break;
+    }
+    const requestedMinimumWords = requests.reduce(
+      (total, request) => total + request.minAdditionalWords,
+      0,
+    );
+    const requestedMaximumWords = requests.reduce(
+      (total, request) => total + request.maxAdditionalWords,
+      0,
+    );
     const snapshot = expanded;
     const additions = await mapWithConcurrency(
       requests,
@@ -1051,7 +1116,13 @@ async function expandSectionsToEpisodeMinimum(
       expanded[request.sectionIndex] = additions[index];
     });
     expanded = removeSectionRepetition(expanded);
-    if (totalSectionWords(expanded) <= wordsBeforeRound) break;
+    const wordsAfterRound = totalSectionWords(expanded);
+    const acceptedWords = Math.max(0, wordsAfterRound - wordsBeforeRound);
+    logOllamaDecision(
+      "expansion",
+      `round=${round + 1} total_words=${wordsAfterRound} deficit_words=${Math.max(0, minimumEpisodeWords - wordsAfterRound)} requested_words=${requestedMinimumWords}-${requestedMaximumWords} accepted_words=${acceptedWords}`,
+    );
+    if (wordsAfterRound <= wordsBeforeRound) break;
   }
   return expanded;
 }
@@ -1700,6 +1771,16 @@ async function reviewAndRepairSections(
     const narrativeIssues = narrativeRepairBatches < maxNarrativeRepairBatches
       ? narrative.issues
       : [];
+    const evidenceSections = [...new Set(
+      evidence.issues.map((issue) => issue.sectionNumber),
+    )].sort((left, right) => left - right);
+    const narrativeSections = [...new Set(
+      narrativeIssues.map((issue) => issue.sectionNumber),
+    )].sort((left, right) => left - right);
+    logOllamaDecision(
+      "critics",
+      `evidence_issues=${evidence.issues.length} evidence_sections=${evidenceSections.join(",") || "none"} narrative_issues=${narrativeIssues.length} narrative_sections=${narrativeSections.join(",") || "none"}`,
+    );
     if (!evidence.issues.length && !narrativeIssues.length) {
       // Narrative judgments can be subjective. High-confidence verbatim
       // overlap is still enforced by deterministic gates after this function.
@@ -1816,6 +1897,7 @@ export async function createStructuredPodcast(
   const podcastPlan = await createPodcastPlan(
     items,
     episodeType,
+    episodeLength,
     regeneration,
   );
   const previousSections = regeneration
@@ -1851,6 +1933,11 @@ export async function createStructuredPodcast(
         podcastPlan.facts,
       );
     },
+  );
+  const firstPassWords = totalSectionWords(sections);
+  logOllamaDecision(
+    "first_pass",
+    `total_words=${firstPassWords} deficit_words=${Math.max(0, profile.minWords - firstPassWords)} target_words=${profile.minWords}`,
   );
   const lengthenedSections = await expandSectionsToEpisodeMinimum(
     items,

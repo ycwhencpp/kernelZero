@@ -13,9 +13,11 @@ import {
 } from "../lib/domain.ts";
 import {
   aiProviderLabel,
+  estimatedAudioCostUsd,
   estimatedGenerationCostUsd,
   resolveAiProvider,
 } from "../lib/ai-config.ts";
+import { encodedAudioDurationSeconds } from "../lib/audio-duration.ts";
 import {
   naturalNarrationTempo,
   prepareChatterboxSegments,
@@ -42,6 +44,7 @@ import {
 } from "../lib/profile-avatar.ts";
 import {
   createLinkedInPost as createGeminiLinkedInPost,
+  pcmToWav,
 } from "../lib/gemini.ts";
 import {
   hasUsableAudioUrl,
@@ -73,9 +76,14 @@ import {
   mapWithConcurrency,
   normalizePodcastPlan,
   planSectionExpansions,
+  podcastPlanFactCardLimit,
   trimNarrationToCompleteSentences,
 } from "../lib/ollama.ts";
-import { chunkForSpeech, generatePodcast } from "../lib/openai.ts";
+import {
+  chunkForSpeech,
+  generatePodcast,
+  synthesizePodcastAudio,
+} from "../lib/openai.ts";
 import {
   countScriptWords,
   episodeLengthAcceptanceRange,
@@ -106,7 +114,10 @@ import {
 } from "../lib/script-repetition.ts";
 import { splitNarrationSentences } from "../lib/sentence-segmentation.ts";
 import {
+  acquireJobLease,
   EpisodeNotFoundError,
+  finishJobLease,
+  renewJobLease,
   saveLinkedInPost,
   storedDurationSeconds,
 } from "../lib/store.ts";
@@ -154,6 +165,27 @@ function item(overrides: Partial<ContentItem> = {}): ContentItem {
     }),
     ...overrides,
   };
+}
+
+function testMp3(frameCounts: number[] = [1]): ArrayBuffer {
+  // MPEG-1 Layer III, 128 kbps, 44.1 kHz: 417 encoded bytes and 1,152
+  // samples per frame. Each segment starts with an empty ID3v2 tag to mirror
+  // the concatenated responses returned by chunked OpenAI speech synthesis.
+  const frameByteLength = 417;
+  const segmentByteLength = (frameCount: number) => 10 + frameCount * frameByteLength;
+  const bytes = new Uint8Array(
+    frameCounts.reduce((total, frameCount) => total + segmentByteLength(frameCount), 0),
+  );
+  let offset = 0;
+  for (const frameCount of frameCounts) {
+    bytes.set([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, 0], offset);
+    offset += 10;
+    for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+      bytes.set([0xff, 0xfb, 0x90, 0], offset);
+      offset += frameByteLength;
+    }
+  }
+  return bytes.buffer;
 }
 
 test("canonical identity prefers DOI and normalizes it", () => {
@@ -618,6 +650,26 @@ test("generated audio duration is normalized for integer database storage", () =
   assert.equal(storedDurationSeconds(Number.NaN), 0);
 });
 
+test("encoded WAV duration is read from its PCM byte rate", () => {
+  const wav = pcmToWav(new Uint8Array(48_000), 24_000);
+  assert.equal(encodedAudioDurationSeconds(wav, "audio/wav"), 1);
+});
+
+test("encoded MP3 duration includes every frame across concatenated ID3 streams", () => {
+  const durationSeconds = encodedAudioDurationSeconds(
+    testMp3([4, 6]),
+    "audio/mpeg; codecs=mp3",
+  );
+  assert.ok(Math.abs(durationSeconds - (10 * 1_152) / 44_100) < 1e-9);
+});
+
+test("audio synthesis requires either a provider or an active local voice", async () => {
+  await assert.rejects(
+    synthesizePodcastAudio("A script without an audio provider.", null, null),
+    /Choose an active local Chatterbox voice or configure an AI provider/,
+  );
+});
+
 test("generation response keeps returned audio when refreshed state is stale", () => {
   const staleEpisode: Episode = {
     id: "episode-regenerated",
@@ -656,6 +708,57 @@ test("generation response keeps returned audio when refreshed state is stale", (
   assert.throws(
     () => requireGeneratedAudio(staleEpisode, true),
     /no stored audio URL/,
+  );
+});
+
+test("generation reconciliation preserves authoritative edits while attaching returned audio", () => {
+  const returnedEpisode: Episode = {
+    id: "episode-concurrent-edit",
+    type: "daily_digest",
+    title: "Original title",
+    dek: "Original dek.",
+    script: "The original script.",
+    showNotes: "Original notes.",
+    transcript: "The original script.",
+    citations: [],
+    chapters: [{ title: "Opening", startSeconds: 0 }],
+    audioUrl: "/api/media/audio/new.mp3",
+    audioKey: "audio/new.mp3",
+    audioBytes: 42,
+    durationSeconds: 240,
+    status: "needs_approval",
+    publishedAt: null,
+    immutableGuid: "kernelzero:episode-concurrent-edit",
+    generation: 1,
+    createdAt: "2026-07-28T00:00:00.000Z",
+  };
+  const storedEpisode = {
+    ...returnedEpisode,
+    title: "Concurrent editor title",
+    script: "A concurrently edited script.",
+    transcript: "A concurrently edited script.",
+    audioUrl: null,
+    audioKey: null,
+    audioBytes: null,
+  };
+
+  const reconciled = reconcileGeneratedEpisode(
+    { episodes: [storedEpisode] },
+    returnedEpisode,
+    { stateIsAuthoritative: true },
+  );
+
+  assert.equal(reconciled.episode.title, "Concurrent editor title");
+  assert.equal(reconciled.episode.script, "A concurrently edited script.");
+  assert.equal(reconciled.episode.audioUrl, returnedEpisode.audioUrl);
+  assert.throws(
+    () =>
+      reconcileGeneratedEpisode(
+        { episodes: [] },
+        returnedEpisode,
+        { stateIsAuthoritative: true },
+      ),
+    /episode was removed/i,
   );
 });
 
@@ -1321,6 +1424,140 @@ test("daily budget gate permits free work and rejects overspend", () => {
   assert.equal(hasBudgetForGeneration(2, 2, 0), true);
 });
 
+test("daily job lease rejects a live run and atomically reclaims a stale run", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const originalServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  let stale = false;
+
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  globalThis.fetch = (async (input, init) => {
+    const method = init?.method ?? "GET";
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    requests.push({ method, url, body });
+    if (method === "POST") {
+      return new Response(
+        JSON.stringify({
+          code: "23505",
+          details: null,
+          hint: null,
+          message: "duplicate job lease",
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (method === "GET") {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          started_at: stale
+            ? "2026-01-01T00:00:00.000Z"
+            : new Date(Date.now() + 60_000).toISOString(),
+          attempts: 1,
+          cost_usd: 0.1,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    if (method === "PATCH") {
+      return new Response(JSON.stringify({ id: "daily-2026-08-04" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`Unexpected lease request: ${method} ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const liveLease = await acquireJobLease(
+      "owner-1",
+      {
+        id: "daily-2026-08-04",
+        stage: "Daily research and digest",
+        costUsd: 0.1,
+      },
+      2 * 60 * 60 * 1_000,
+    );
+    assert.deepEqual(liveLease, {
+      acquired: false,
+      status: "running",
+      startedAt: null,
+      costUsd: 0.1,
+    });
+    assert.deepEqual(requests.map((request) => request.method), ["POST", "GET"]);
+
+    stale = true;
+    requests.length = 0;
+    const recoveredLease = await acquireJobLease(
+      "owner-1",
+      {
+        id: "daily-2026-08-04",
+        stage: "Daily research and digest",
+        costUsd: 0.1,
+      },
+      2 * 60 * 60 * 1_000,
+    );
+    assert.equal(recoveredLease.acquired, true);
+    assert.equal(recoveredLease.status, "running");
+    assert.equal(typeof recoveredLease.startedAt, "string");
+    assert.equal(recoveredLease.costUsd, 0.2);
+    assert.deepEqual(
+      requests.map((request) => request.method),
+      ["POST", "GET", "PATCH"],
+    );
+    assert.match(requests[2].url, /status=eq\.running/);
+    assert.match(requests[2].url, /started_at=eq\./);
+    assert.equal(
+      (requests[2].body as Record<string, unknown>).attempts,
+      2,
+    );
+    assert.equal(
+      (requests[2].body as Record<string, unknown>).cost_usd,
+      0.2,
+    );
+
+    requests.length = 0;
+    const renewedAt = await renewJobLease(
+      "owner-1",
+      "daily-2026-08-04",
+      recoveredLease.startedAt!,
+    );
+    assert.equal(typeof renewedAt, "string");
+    assert.match(requests[0].url, /status=eq\.running/);
+    assert.match(requests[0].url, /started_at=eq\./);
+
+    requests.length = 0;
+    assert.equal(
+      await finishJobLease("owner-1", renewedAt!, {
+        id: "daily-2026-08-04",
+        stage: "Daily research and digest",
+        status: "completed",
+      }),
+      true,
+    );
+    assert.equal(
+      (requests[0].body as Record<string, unknown>).status,
+      "completed",
+    );
+    assert.match(requests[0].url, /started_at=eq\./);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSupabaseUrl === undefined) {
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    } else {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = originalSupabaseUrl;
+    }
+    if (originalServiceKey === undefined) {
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    } else {
+      process.env.SUPABASE_SERVICE_ROLE_KEY = originalServiceKey;
+    }
+  }
+});
+
 test("evidence confidence accepts fractions and percentages but rejects overflow", () => {
   assert.equal(normalizeEvidenceConfidence(0.87), 0.87);
   assert.equal(normalizeEvidenceConfidence(87), 0.87);
@@ -1339,6 +1576,9 @@ test("local Ollama provider is key-free and has no API spend", () => {
     assert.equal(resolveAiProvider(), "ollama");
     assert.equal(aiProviderLabel("ollama"), "Local Ollama");
     assert.equal(estimatedGenerationCostUsd("ollama", true), 0);
+    assert.equal(estimatedAudioCostUsd("ollama"), 0);
+    assert.equal(estimatedAudioCostUsd("openai"), 0.1);
+    assert.equal(estimatedAudioCostUsd("gemini"), 0.08);
   } finally {
     if (originalProvider === undefined) delete process.env.AI_PROVIDER;
     else process.env.AI_PROVIDER = originalProvider;
@@ -1872,6 +2112,17 @@ test("Ollama planner keeps valid fact ownership and fills all section contracts"
   assert.match(plan.sections[0].focus, /overview/i);
 });
 
+test("Ollama planner scales fact-card depth with sources and episode length", () => {
+  assert.equal(podcastPlanFactCardLimit(1, "brief"), 12);
+  assert.equal(podcastPlanFactCardLimit(3, "brief"), 12);
+  assert.equal(podcastPlanFactCardLimit(1, "standard"), 16);
+  assert.equal(podcastPlanFactCardLimit(2, "standard"), 18);
+  assert.equal(podcastPlanFactCardLimit(3, "standard"), 18);
+  assert.equal(podcastPlanFactCardLimit(1, "deep"), 20);
+  assert.equal(podcastPlanFactCardLimit(2, "deep"), 22);
+  assert.equal(podcastPlanFactCardLimit(3, "deep"), 24);
+});
+
 test("Ollama pipeline fans out writers and fans in parallel critics", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
@@ -1963,10 +2214,105 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
   }
 });
 
-test("Ollama fills a short episode with one parallel addendum pass", async () => {
+test("Ollama gives an under-length first-pass section one deficit-aware rewrite", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
   process.env.OLLAMA_PARALLELISM = "3";
+  const sectionWords = [28, 53, 73, 77, 49, 77, 48];
+  const writerCalls = Array.from({ length: 7 }, () => 0);
+  const sectionThreePrompts: string[] = [];
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      return ndjson({
+        title: "Deficit-aware retry",
+        dek: "Short first passes receive one useful rewrite.",
+        facts: [{
+          id: "F1",
+          statement: "The source describes a grounded method.",
+          sourceNumber: 1,
+          sectionNumber: 3,
+        }],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Section ${index + 1} focus.`,
+        })),
+      });
+    }
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
+      const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      writerCalls[sectionNumber - 1] += 1;
+      if (sectionNumber === 3) sectionThreePrompts.push(user);
+      const wordCount = sectionNumber === 3 && writerCalls[2] === 1
+        ? 12
+        : sectionWords[sectionNumber - 1];
+      return ndjson({
+        script: Array.from(
+          { length: wordCount },
+          (_, index) => `section${sectionNumber}word${index}`,
+        ).join(" ") + ".",
+        claims: [],
+      });
+    }
+    if (
+      system.includes("source-fabrication checker") ||
+      system.includes("podcast narrative editor")
+    ) {
+      return ndjson({ issues: [] });
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    const generated = await createOllamaPodcast(
+      [item()],
+      "daily_digest",
+      "brief",
+    );
+    assert.equal(countScriptWords(generated.script), 405);
+    assert.deepEqual(writerCalls, [1, 1, 2, 1, 1, 1, 1]);
+    assert.equal(sectionThreePrompts.length, 2);
+    assert.notEqual(sectionThreePrompts[0], sectionThreePrompts[1]);
+    assert.doesNotMatch(sectionThreePrompts[0], /LENGTH REPAIR ATTEMPT/);
+    assert.match(sectionThreePrompts[1], /LENGTH REPAIR ATTEMPT 2/);
+    assert.match(sectionThreePrompts[1], /deficit of 61 words/);
+    assert.match(sectionThreePrompts[1], /at least 61 net new words/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
+test("Ollama fills a short episode with one parallel addendum pass", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  const originalLogTimings = process.env.OLLAMA_LOG_TIMINGS;
+  const originalConsoleInfo = console.info;
+  process.env.OLLAMA_PARALLELISM = "3";
+  process.env.OLLAMA_LOG_TIMINGS = "true";
+  const decisionLogs: string[] = [];
+  console.info = (...values: unknown[]) => {
+    decisionLogs.push(values.map(String).join(" "));
+  };
   let writerCalls = 0;
   let expansionCalls = 0;
   const expansionPrompts: string[] = [];
@@ -2052,26 +2398,59 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
       "daily_digest",
       "standard",
     );
-    assert.equal(writerCalls, 7);
+    assert.equal(writerCalls, 14);
     assert.equal(expansionCalls, 5);
     assert.equal(peakExpansions, 3);
     assert.equal(countScriptWords(generated.script), 1_264);
     assert.ok(
       expansionPrompts.every((prompt) =>
-        prompt.includes("Do not introduce a new trend, shift, hardware")
+        prompt.includes(
+          "new detail whose exact substance is explicitly present in the supplied source packet",
+        ) && prompt.includes("verify internally which source number states it")
+      ),
+    );
+    assert.ok(
+      decisionLogs.some((entry) =>
+        entry.includes(
+          "decision=first_pass total_words=399 deficit_words=816 target_words=1215",
+        )
+      ),
+    );
+    assert.ok(
+      decisionLogs.some((entry) =>
+        /decision=expansion .*requested_words=\d+-\d+ accepted_words=\d+/.test(
+          entry,
+        )
+      ),
+    );
+    assert.ok(
+      decisionLogs.some((entry) =>
+        entry.includes(
+          "decision=critics evidence_issues=0 evidence_sections=none narrative_issues=0 narrative_sections=none",
+        )
       ),
     );
   } finally {
     globalThis.fetch = originalFetch;
+    console.info = originalConsoleInfo;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
     else process.env.OLLAMA_PARALLELISM = originalParallelism;
+    if (originalLogTimings === undefined) delete process.env.OLLAMA_LOG_TIMINGS;
+    else process.env.OLLAMA_LOG_TIMINGS = originalLogTimings;
   }
 });
 
 test("Ollama critics repair a new evidence issue that appears on a late audit", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  const originalLogTimings = process.env.OLLAMA_LOG_TIMINGS;
+  const originalConsoleInfo = console.info;
   process.env.OLLAMA_PARALLELISM = "3";
+  process.env.OLLAMA_LOG_TIMINGS = "true";
+  const decisionLogs: string[] = [];
+  console.info = (...values: unknown[]) => {
+    decisionLogs.push(values.map(String).join(" "));
+  };
   const sectionWords = [28, 53, 73, 77, 49, 77, 48];
   const unsupportedDetail = "invented cascade result";
   const lateUnsupportedDetail =
@@ -2191,10 +2570,27 @@ test("Ollama critics repair a new evidence issue that appears on a late audit", 
       repairPrompts[2],
       /Exact flagged excerpt: "This trend highlights a shift toward specialized hardware for inference\."/,
     );
+    assert.ok(
+      decisionLogs.some((entry) =>
+        entry.includes(
+          "decision=critics evidence_issues=1 evidence_sections=3 narrative_issues=0 narrative_sections=none",
+        )
+      ),
+    );
+    assert.ok(
+      decisionLogs.some((entry) =>
+        entry.includes(
+          "decision=critics evidence_issues=1 evidence_sections=6 narrative_issues=0 narrative_sections=none",
+        )
+      ),
+    );
   } finally {
     globalThis.fetch = originalFetch;
+    console.info = originalConsoleInfo;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
     else process.env.OLLAMA_PARALLELISM = originalParallelism;
+    if (originalLogTimings === undefined) delete process.env.OLLAMA_LOG_TIMINGS;
+    else process.env.OLLAMA_LOG_TIMINGS = originalLogTimings;
   }
 });
 
@@ -2315,7 +2711,15 @@ test("Ollama falls back instead of doubling a runaway editorial plan", async () 
 
   try {
     await assert.rejects(
-      createOllamaPodcast([item()], "daily_digest", "standard"),
+      createOllamaPodcast(
+        [
+          item({ id: "planner-source-1" }),
+          item({ id: "planner-source-2" }),
+          item({ id: "planner-source-3" }),
+        ],
+        "daily_digest",
+        "standard",
+      ),
       /Stop after inspecting the fallback section request/,
     );
     assert.equal(requests.length, 2);
@@ -2325,7 +2729,7 @@ test("Ollama falls back instead of doubling a runaway editorial plan", async () 
     assert.ok(requests[0].format);
     assert.match(
       requests[0].messages?.[1]?.content ?? "",
-      /no more than 12 source-grounded fact cards/,
+      /no more than 18 source-grounded fact cards/,
     );
     assert.equal(requests[1].think, false);
     assert.ok(requests[1].options.num_predict >= 1_536);
@@ -2627,6 +3031,7 @@ test("OpenAI speech receives the podcast performance direction", async () => {
   const originalTtsModel = process.env.OPENAI_TTS_MODEL;
   const originalTtsVoice = process.env.OPENAI_TTS_VOICE;
   const speechRequests: Array<Record<string, unknown>> = [];
+  let checkpointedDraft = false;
   const cleanScript = Array.from(
     { length: 405 },
     (_, index) => `spoken${index}`,
@@ -2641,10 +3046,15 @@ test("OpenAI speech receives the podcast performance direction", async () => {
   process.env.OPENAI_TTS_VOICE = "onyx";
   globalThis.fetch = (async (input, init) => {
     if (String(input).endsWith("/v1/audio/speech")) {
+      assert.equal(
+        checkpointedDraft,
+        true,
+        "the validated draft must be checkpointed before speech starts",
+      );
       speechRequests.push(
         JSON.parse(String(init?.body)) as Record<string, unknown>,
       );
-      return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      return new Response(testMp3([50, 50]), { status: 200 });
     }
     return new Response(
       JSON.stringify({
@@ -2665,10 +3075,28 @@ test("OpenAI speech receives the podcast performance direction", async () => {
     const generated = await generatePodcast([item()], "daily_digest", {
       includeAudio: true,
       episodeLength: "brief",
+      episodeId: "episode-checkpoint-order",
+      onDraftReady: async (checkpoint) => {
+        assert.equal(speechRequests.length, 0);
+        assert.equal(checkpoint.episode.script, cleanScript);
+        assert.equal(checkpoint.episode.audioUrl, null);
+        assert.equal(checkpoint.episode.id, "episode-checkpoint-order");
+        assert.equal(checkpoint.provider, "openai");
+        checkpointedDraft = true;
+      },
     });
     const speechRequest = speechRequests[0];
     assert.ok(speechRequest);
     assert.equal(generated.audioContentType, "audio/mpeg");
+    assert.ok(
+      Math.abs(
+        generated.episode.durationSeconds -
+          (speechRequests.length * 100 * 1_152) / 44_100,
+      ) < 1e-9,
+      "episode duration must come from encoded MP3 frames, not the script estimate",
+    );
+    assert.equal(generated.episode.id, "episode-checkpoint-order");
+    assert.equal(checkpointedDraft, true);
     assert.equal(speechRequest?.model, "gpt-4o-mini-tts");
     assert.equal(speechRequest?.voice, "onyx");
     assert.equal(

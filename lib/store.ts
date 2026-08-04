@@ -250,7 +250,7 @@ export async function replaceEpisodeAudio(
     throw new Error(`Unable to store regenerated audio: ${uploadError.message}`);
   }
   const nextAudioUrl = mediaUrl(key);
-  const { error } = await db
+  const { data: updatedEpisode, error } = await db
     .from("episodes")
     .update({
       audio_key: key,
@@ -261,10 +261,33 @@ export async function replaceEpisodeAudio(
       updated_at: new Date().toISOString(),
     })
     .eq("id", episode.id)
-    .eq("owner_id", ownerId);
-  if (error) throw new Error(error.message);
+    .eq("owner_id", ownerId)
+    .select("id")
+    .maybeSingle();
+  if (error || !updatedEpisode) {
+    const { error: cleanupError } = await db.storage
+      .from(MEDIA_BUCKET)
+      .remove([key]);
+    if (cleanupError) {
+      console.error(
+        `[storage] cleanup failed bucket=${MEDIA_BUCKET} key=${key}`,
+        cleanupError,
+      );
+    }
+    throw new Error(
+      error?.message ?? "Episode not found while storing regenerated audio.",
+    );
+  }
   if (episode.audioKey) {
-    await db.storage.from(MEDIA_BUCKET).remove([episode.audioKey]);
+    const { error: cleanupError } = await db.storage
+      .from(MEDIA_BUCKET)
+      .remove([episode.audioKey]);
+    if (cleanupError) {
+      console.error(
+        `[storage] previous audio cleanup failed bucket=${MEDIA_BUCKET} key=${episode.audioKey}`,
+        cleanupError,
+      );
+    }
   }
   return {
     ...episode,
@@ -365,4 +388,182 @@ export async function getPublicEpisodes() { const db = await requireDb(); if (!d
 export async function getPublicEpisode(id: string) { const db = await requireDb(); if (!db) return null; const { data } = await db.from("episodes").select().eq("id", id).eq("status", "published").maybeSingle(); return data ? mapEpisode(data) : null; }
 export async function getMediaEpisodeAccess(key: string): Promise<{ ownerId: string; status: Episode["status"] } | null> { const db = await requireDb(); if (!db) return null; const { data, error } = await db.from("episodes").select("owner_id, status").eq("audio_key", key).limit(1).maybeSingle(); if (error) throw new Error(error.message); return data ? { ownerId: data.owner_id, status: data.status } : null; }
 export async function getSignedMediaUrl(key: string, expiresInSeconds = 60) { const db = await requireDb(); if (!db) return null; const { data, error } = await db.storage.from(MEDIA_BUCKET).createSignedUrl(key, expiresInSeconds); if (error || !data?.signedUrl) return null; return data.signedUrl; }
-export async function recordJob(ownerId: string, job: { id: string; stage: string; status: JobRun["status"]; provider?: string; costUsd?: number; error?: string }) { const db = await requireDb(); if (db) await db.from("job_runs").upsert({ id: job.id, owner_id: ownerId, stage: job.stage, status: job.status, provider: job.provider ?? null, cost_usd: job.costUsd ?? 0, error: job.error ?? null, idempotency_key: job.id, completed_at: job.status === "completed" || job.status === "failed" ? new Date().toISOString() : null }, { onConflict: "owner_id,id" }); }
+export type JobLeaseResult = {
+  acquired: boolean;
+  status: JobRun["status"] | null;
+  startedAt: string | null;
+  costUsd: number;
+};
+
+/**
+ * Atomically starts a job, or takes over an existing terminal/stale run.
+ * The compare-and-swap on started_at ensures only one stale-job contender wins.
+ */
+export async function acquireJobLease(
+  ownerId: string,
+  job: { id: string; stage: string; provider?: string; costUsd?: number },
+  staleAfterMs: number,
+): Promise<JobLeaseResult> {
+  const db = await requireDb();
+  if (!db) {
+    return {
+      acquired: true,
+      status: "running",
+      startedAt: new Date().toISOString(),
+      costUsd: job.costUsd ?? 0,
+    };
+  }
+
+  const startedAt = new Date().toISOString();
+  const row = {
+    id: job.id,
+    owner_id: ownerId,
+    stage: job.stage,
+    status: "running" as const,
+    attempts: 1,
+    provider: job.provider ?? null,
+    cost_usd: job.costUsd ?? 0,
+    error: null,
+    idempotency_key: job.id,
+    started_at: startedAt,
+    completed_at: null,
+  };
+  const inserted = await db
+    .from("job_runs")
+    .insert(row)
+    .select("id")
+    .maybeSingle();
+  if (!inserted.error && inserted.data) {
+    return {
+      acquired: true,
+      status: "running",
+      startedAt,
+      costUsd: job.costUsd ?? 0,
+    };
+  }
+
+  const existing = await db
+    .from("job_runs")
+    .select("status, started_at, attempts, cost_usd")
+    .eq("owner_id", ownerId)
+    .eq("id", job.id)
+    .maybeSingle();
+  if (existing.error || !existing.data) {
+    throw new Error(
+      `Unable to acquire job lease: ${existing.error?.message ?? inserted.error?.message ?? "job row was not found"}`,
+    );
+  }
+
+  const existingStatus = existing.data.status as JobRun["status"];
+  const existingStartedAt = String(existing.data.started_at);
+  const existingCostUsd = Number(existing.data.cost_usd) || 0;
+  const leaseAgeMs = Date.now() - new Date(existingStartedAt).getTime();
+  if (
+    existingStatus === "running" &&
+    Number.isFinite(leaseAgeMs) &&
+    leaseAgeMs < staleAfterMs
+  ) {
+    return {
+      acquired: false,
+      status: existingStatus,
+      startedAt: null,
+      costUsd: existingCostUsd,
+    };
+  }
+
+  const claimedCostUsd = existingCostUsd + (job.costUsd ?? 0);
+
+  const claimed = await db
+    .from("job_runs")
+    .update({
+      ...row,
+      attempts: Math.max(1, Number(existing.data.attempts) || 1) + 1,
+      cost_usd: claimedCostUsd,
+    })
+    .eq("owner_id", ownerId)
+    .eq("id", job.id)
+    .eq("status", existingStatus)
+    .eq("started_at", existingStartedAt)
+    .select("id")
+    .maybeSingle();
+  if (claimed.error) {
+    throw new Error(`Unable to acquire job lease: ${claimed.error.message}`);
+  }
+  return {
+    acquired: Boolean(claimed.data),
+    status: existingStatus,
+    startedAt: claimed.data ? startedAt : null,
+    costUsd: claimed.data ? claimedCostUsd : existingCostUsd,
+  };
+}
+
+/** Renews a running lease and returns its next fencing token. */
+export async function renewJobLease(
+  ownerId: string,
+  jobId: string,
+  startedAt: string,
+): Promise<string | null> {
+  const previousTime = new Date(startedAt).getTime();
+  const renewedAt = new Date(
+    Math.max(Date.now(), Number.isFinite(previousTime) ? previousTime + 1 : 0),
+  ).toISOString();
+  const db = await requireDb();
+  if (!db) return renewedAt;
+  const renewed = await db
+    .from("job_runs")
+    .update({ started_at: renewedAt })
+    .eq("owner_id", ownerId)
+    .eq("id", jobId)
+    .eq("status", "running")
+    .eq("started_at", startedAt)
+    .select("id")
+    .maybeSingle();
+  if (renewed.error) {
+    throw new Error(`Unable to renew job lease: ${renewed.error.message}`);
+  }
+  return renewed.data ? renewedAt : null;
+}
+
+/** Records a terminal result only when the caller still owns the lease. */
+export async function finishJobLease(
+  ownerId: string,
+  startedAt: string,
+  job: {
+    id: string;
+    stage: string;
+    status: "completed" | "failed";
+    provider?: string;
+    costUsd?: number;
+    error?: string;
+  },
+): Promise<boolean> {
+  const db = await requireDb();
+  if (!db) return true;
+  const finished = await db
+    .from("job_runs")
+    .update({
+      stage: job.stage,
+      status: job.status,
+      provider: job.provider ?? null,
+      cost_usd: job.costUsd ?? 0,
+      error: job.error ?? null,
+      completed_at: new Date().toISOString(),
+    })
+    .eq("owner_id", ownerId)
+    .eq("id", job.id)
+    .eq("status", "running")
+    .eq("started_at", startedAt)
+    .select("id")
+    .maybeSingle();
+  if (finished.error) {
+    throw new Error(`Unable to finish job lease: ${finished.error.message}`);
+  }
+  return Boolean(finished.data);
+}
+
+export async function recordJob(ownerId: string, job: { id: string; stage: string; status: JobRun["status"]; provider?: string; costUsd?: number; error?: string }) {
+  const db = await requireDb();
+  if (!db) return;
+  const { error } = await db.from("job_runs").upsert({ id: job.id, owner_id: ownerId, stage: job.stage, status: job.status, provider: job.provider ?? null, cost_usd: job.costUsd ?? 0, error: job.error ?? null, idempotency_key: job.id, completed_at: job.status === "completed" || job.status === "failed" ? new Date().toISOString() : null }, { onConflict: "owner_id,id" });
+  if (error) throw new Error(`Unable to record job status: ${error.message}`);
+}
