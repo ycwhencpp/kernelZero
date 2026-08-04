@@ -1691,7 +1691,7 @@ async function auditPodcastNarrative(
       {
         role: "system",
         content:
-          "You are a conservative podcast narrative editor. Flag only material problems: a concrete fact or explanation retold across sections, a section violating its stated purpose, an unfinished transition, a broken conclusion, conspicuously robotic essay cadence, a canned AI transition, an internal section title spoken aloud, emotion that clashes with the subject, or prose with no natural breathing room across a genuine topic change. Do not flag normal topic continuity, brief callbacks, implications that build on earlier facts, or restrained stylistic differences. Return an empty issues array when the script is coherent and conversational. Return compact JSON only.",
+          "You are a conservative podcast narrative editor. Flag only material problems: a concrete fact or explanation retold across sections, a section violating its stated purpose, an unfinished transition, a broken conclusion, conspicuously robotic essay cadence, a canned AI transition (including the stock bridge 'To understand X, we need/have to look at Y' or a close variant), an internal section title spoken aloud, emotion that clashes with the subject, or prose with no natural breathing room across a genuine topic change. Do not flag normal topic continuity, brief callbacks, implications that build on earlier facts, or restrained stylistic differences. Return an empty issues array when the script is coherent and conversational. Return compact JSON only.",
       },
       {
         role: "user",

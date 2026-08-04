@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Local Chatterbox Turbo worker. Its input and output file paths are supplied by KernelZero."""
 
+import hashlib
 import json
 import math
+import os
 import re
 import sys
 
@@ -13,6 +15,11 @@ from chatterbox.tts_turbo import ChatterboxTurboTTS
 
 LEADING_DELIVERY_TAGS = re.compile(
     r"^(?:\[(?:dramatic|happy|narration|surprised)\]\s*)+",
+    re.IGNORECASE,
+)
+FATAL_GENERATION_RUNTIME_ERROR = re.compile(
+    r"out of memory|device-side assert|not enough memory|cannot allocate memory|"
+    r"can't allocate memory|bad_alloc|errno\s*12",
     re.IGNORECASE,
 )
 
@@ -73,9 +80,8 @@ def fast_fallback_ceiling_words_per_minute(
     max_words_per_minute: float,
     max_tempo_adjustment: float,
 ) -> float:
-    """Highest clear near-limit rate tolerated after all strict retries fail."""
-    near_limit_tolerance = min(0.02, max_tempo_adjustment)
-    return max_words_per_minute * (1.0 + near_limit_tolerance)
+    """Highest clear rate tolerated after retries, symmetric with slow audio."""
+    return max_words_per_minute * (1.0 + max_tempo_adjustment)
 
 
 def should_prefer_fast_fallback(
@@ -84,7 +90,7 @@ def should_prefer_fast_fallback(
     max_words_per_minute: float,
     max_tempo_adjustment: float,
 ) -> bool:
-    """Keep the slowest over-limit candidate within a narrow jitter margin."""
+    """Keep the slowest over-limit candidate within the bounded tolerance."""
     fallback_ceiling = fast_fallback_ceiling_words_per_minute(
         max_words_per_minute,
         max_tempo_adjustment,
@@ -96,6 +102,67 @@ def should_prefer_fast_fallback(
             or candidate_words_per_minute < current_words_per_minute
         )
     )
+
+
+def speaking_rate_distance_to_range(
+    words_per_minute: float,
+    min_words_per_minute: float,
+    max_words_per_minute: float,
+) -> float:
+    if words_per_minute < min_words_per_minute:
+        return min_words_per_minute - words_per_minute
+    if words_per_minute > max_words_per_minute:
+        return words_per_minute - max_words_per_minute
+    return 0.0
+
+
+def should_prefer_bounded_fallback(
+    candidate_words_per_minute: float,
+    current_words_per_minute: float | None,
+    min_words_per_minute: float,
+    max_words_per_minute: float,
+    max_tempo_adjustment: float,
+) -> bool:
+    """Choose the clear, repairable candidate closest to the valid range."""
+    eligible = should_prefer_slow_fallback(
+        candidate_words_per_minute,
+        None,
+        min_words_per_minute,
+        max_tempo_adjustment,
+    ) or should_prefer_fast_fallback(
+        candidate_words_per_minute,
+        None,
+        max_words_per_minute,
+        max_tempo_adjustment,
+    )
+    if not eligible:
+        return False
+    if current_words_per_minute is None:
+        return True
+    candidate_distance = speaking_rate_distance_to_range(
+        candidate_words_per_minute,
+        min_words_per_minute,
+        max_words_per_minute,
+    )
+    current_distance = speaking_rate_distance_to_range(
+        current_words_per_minute,
+        min_words_per_minute,
+        max_words_per_minute,
+    )
+    if candidate_distance != current_distance:
+        return candidate_distance < current_distance
+    midpoint = (min_words_per_minute + max_words_per_minute) / 2.0
+    return abs(candidate_words_per_minute - midpoint) < abs(
+        current_words_per_minute - midpoint
+    )
+
+
+def recovery_generation_settings(
+    temperature: float,
+    top_p: float,
+) -> tuple[float, float]:
+    """Use one calmer, less variable attempt after strict retries are exhausted."""
+    return max(0.1, temperature * 0.75), max(0.1, min(top_p, 0.85))
 
 
 def emit_segment_diagnostic(
@@ -136,6 +203,8 @@ def emit_segment_diagnostic(
 def validate_generated_audio(wav: torch.Tensor, text: str, sample_rate: int) -> None:
     """Reject silent, mostly silent, clipped, or implausibly long model output."""
     samples = wav.flatten().float()
+    if samples.numel() == 0 or not bool(torch.isfinite(samples).all()):
+        raise ValueError("Chatterbox produced empty or non-finite audio.")
     duration = samples.numel() / sample_rate
     _, spoken_word_count, _ = segment_speech_metrics(wav, text, sample_rate)
     word_count = max(1, spoken_word_count)
@@ -168,6 +237,304 @@ def validate_generated_audio(wav: torch.Tensor, text: str, sample_rate: int) -> 
         )
 
 
+def generate_segment_attempt(
+    *,
+    model,
+    text: str,
+    index: int,
+    attempt: int,
+    seed: int,
+    repetition_penalty: float,
+    temperature: float,
+    top_p: float,
+    min_words_per_minute: float,
+    max_words_per_minute: float,
+    accepted_status: str,
+    rejected_status: str,
+) -> tuple[
+    torch.Tensor | None,
+    tuple[torch.Tensor, int, int, float, int, float] | None,
+    Exception | None,
+]:
+    """Generate once, keeping clear rate-only failures eligible for fallback."""
+    candidate = None
+    duration = 0.0
+    word_count = 0
+    words_per_minute = math.inf
+    clear_audio = False
+    try:
+        torch.manual_seed(seed)
+        candidate = model.generate(
+            text,
+            repetition_penalty=repetition_penalty,
+            temperature=temperature,
+            top_p=top_p,
+        ).detach().cpu()
+        duration, word_count, words_per_minute = segment_speech_metrics(
+            candidate,
+            text,
+            model.sr,
+        )
+        validate_generated_audio(candidate, text, model.sr)
+        clear_audio = True
+        validate_speaking_rate(
+            words_per_minute,
+            min_words_per_minute,
+            max_words_per_minute,
+        )
+    except (RuntimeError, ValueError) as error:
+        if isinstance(error, RuntimeError) and FATAL_GENERATION_RUNTIME_ERROR.search(
+            str(error)
+        ):
+            raise
+        emit_segment_diagnostic(
+            index=index,
+            attempt=attempt,
+            seed=seed,
+            duration=duration,
+            word_count=word_count,
+            words_per_minute=words_per_minute,
+            min_words_per_minute=min_words_per_minute,
+            max_words_per_minute=max_words_per_minute,
+            status=rejected_status,
+            text=text,
+            reason=str(error),
+        )
+        fallback_candidate = (
+            (candidate, attempt, seed, duration, word_count, words_per_minute)
+            if clear_audio and candidate is not None
+            else None
+        )
+        return None, fallback_candidate, error
+
+    emit_segment_diagnostic(
+        index=index,
+        attempt=attempt,
+        seed=seed,
+        duration=duration,
+        word_count=word_count,
+        words_per_minute=words_per_minute,
+        min_words_per_minute=min_words_per_minute,
+        max_words_per_minute=max_words_per_minute,
+        status=accepted_status,
+        text=text,
+    )
+    return candidate, None, None
+
+
+def accept_bounded_fallback(
+    *,
+    fallback: tuple[torch.Tensor, int, int, float, int, float],
+    index: int,
+    text: str,
+    min_words_per_minute: float,
+    max_words_per_minute: float,
+    max_tempo_adjustment: float,
+) -> torch.Tensor:
+    (
+        generated,
+        fallback_attempt,
+        fallback_seed,
+        fallback_duration,
+        fallback_word_count,
+        fallback_words_per_minute,
+    ) = fallback
+    is_slow = fallback_words_per_minute < min_words_per_minute
+    emit_segment_diagnostic(
+        index=index,
+        attempt=fallback_attempt,
+        seed=fallback_seed,
+        duration=fallback_duration,
+        word_count=fallback_word_count,
+        words_per_minute=fallback_words_per_minute,
+        min_words_per_minute=min_words_per_minute,
+        max_words_per_minute=max_words_per_minute,
+        status=(
+            "accepted_slow_fallback" if is_slow else "accepted_fast_fallback"
+        ),
+        text=text,
+        reason=(
+            "Clear audio selected after retries as the "
+            f"{'fastest below-limit' if is_slow else 'slowest over-limit'} "
+            f"candidate within the bounded {max_tempo_adjustment:.0%} "
+            f"{'slow' if is_slow else 'fast'}-rate tolerance."
+        ),
+    )
+    return generated
+
+
+def generate_validated_segment(
+    *,
+    model,
+    text: str,
+    index: int,
+    retry_epoch: int,
+    repetition_penalty: float,
+    temperature: float,
+    top_p: float,
+    min_words_per_minute: float,
+    max_words_per_minute: float,
+    max_tempo_adjustment: float,
+) -> torch.Tensor:
+    """Generate one segment with strict retries, fallback, then one recovery pass."""
+    last_error: Exception | None = None
+    fallback = None
+    seed_base = 42 + index * 17 + retry_epoch * 1009
+    for attempt in range(1, 4):
+        generated, candidate, error = generate_segment_attempt(
+            model=model,
+            text=text,
+            index=index,
+            attempt=attempt,
+            seed=seed_base + attempt - 1,
+            repetition_penalty=repetition_penalty,
+            temperature=temperature,
+            top_p=top_p,
+            min_words_per_minute=min_words_per_minute,
+            max_words_per_minute=max_words_per_minute,
+            accepted_status="accepted",
+            rejected_status="rejected",
+        )
+        if generated is not None:
+            return generated
+        last_error = error or last_error
+        if candidate is not None and should_prefer_bounded_fallback(
+            candidate[5],
+            fallback[5] if fallback is not None else None,
+            min_words_per_minute,
+            max_words_per_minute,
+            max_tempo_adjustment,
+        ):
+            fallback = candidate
+
+    if fallback is not None:
+        return accept_bounded_fallback(
+            fallback=fallback,
+            index=index,
+            text=text,
+            min_words_per_minute=min_words_per_minute,
+            max_words_per_minute=max_words_per_minute,
+            max_tempo_adjustment=max_tempo_adjustment,
+        )
+
+    recovery_temperature, recovery_top_p = recovery_generation_settings(
+        temperature,
+        top_p,
+    )
+    generated, candidate, error = generate_segment_attempt(
+        model=model,
+        text=text,
+        index=index,
+        attempt=4,
+        seed=seed_base + 3,
+        repetition_penalty=repetition_penalty,
+        temperature=recovery_temperature,
+        top_p=recovery_top_p,
+        min_words_per_minute=min_words_per_minute,
+        max_words_per_minute=max_words_per_minute,
+        accepted_status="accepted_recovery",
+        rejected_status="recovery_rejected",
+    )
+    if generated is not None:
+        return generated
+    last_error = error or last_error
+    if candidate is not None and should_prefer_bounded_fallback(
+        candidate[5],
+        None,
+        min_words_per_minute,
+        max_words_per_minute,
+        max_tempo_adjustment,
+    ):
+        return accept_bounded_fallback(
+            fallback=candidate,
+            index=index,
+            text=text,
+            min_words_per_minute=min_words_per_minute,
+            max_words_per_minute=max_words_per_minute,
+            max_tempo_adjustment=max_tempo_adjustment,
+        )
+    raise ValueError(
+        f"Chatterbox could not produce clear audio for chunk {index + 1}: {last_error}"
+    )
+
+
+def checkpoint_fingerprint(request: dict) -> str:
+    fingerprinted = {
+        key: value
+        for key, value in request.items()
+        if key not in {"checkpointDir", "retryEpoch"}
+    }
+    sample_path = fingerprinted.get("samplePath")
+    if isinstance(sample_path, str):
+        try:
+            sample_stat = os.stat(sample_path)
+            fingerprinted["sampleIdentity"] = {
+                "path": os.path.realpath(sample_path),
+                "size": sample_stat.st_size,
+                "modifiedNanoseconds": sample_stat.st_mtime_ns,
+            }
+        except OSError:
+            fingerprinted["sampleIdentity"] = {"path": os.path.realpath(sample_path)}
+    payload = json.dumps(
+        fingerprinted,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def prepare_checkpoint_directory(checkpoint_dir: str, fingerprint: str) -> None:
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    manifest_path = os.path.join(checkpoint_dir, "manifest.json")
+    existing_fingerprint = None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+        existing_fingerprint = manifest.get("fingerprint")
+    except (OSError, ValueError, AttributeError):
+        pass
+    if existing_fingerprint != fingerprint:
+        for name in os.listdir(checkpoint_dir):
+            if re.fullmatch(r"segment-\d{4}\.wav", name):
+                try:
+                    os.unlink(os.path.join(checkpoint_dir, name))
+                except FileNotFoundError:
+                    pass
+        temporary_manifest = f"{manifest_path}.tmp-{os.getpid()}"
+        with open(temporary_manifest, "w", encoding="utf-8") as manifest_file:
+            json.dump({"fingerprint": fingerprint}, manifest_file)
+        os.replace(temporary_manifest, manifest_path)
+
+
+def save_segment_checkpoint(
+    checkpoint_path: str,
+    wav: torch.Tensor,
+    sample_rate: int,
+) -> None:
+    temporary_path = f"{checkpoint_path}.tmp-{os.getpid()}.wav"
+    torchaudio.save(temporary_path, wav, sample_rate, format="wav")
+    os.replace(temporary_path, checkpoint_path)
+
+
+def load_segment_checkpoint(
+    checkpoint_path: str,
+    text: str,
+    sample_rate: int,
+) -> torch.Tensor | None:
+    try:
+        wav, cached_sample_rate = torchaudio.load(checkpoint_path)
+        if cached_sample_rate != sample_rate:
+            raise ValueError("Cached Chatterbox sample rate does not match the model.")
+        validate_generated_audio(wav, text, sample_rate)
+        return wav
+    except (OSError, RuntimeError, ValueError):
+        try:
+            os.unlink(checkpoint_path)
+        except FileNotFoundError:
+            pass
+        return None
+
+
 def main() -> None:
     if len(sys.argv) != 3:
         raise SystemExit("Usage: chatterbox_tts.py REQUEST_JSON OUTPUT_WAV")
@@ -183,6 +550,8 @@ def main() -> None:
     min_words_per_minute = request.get("minWordsPerMinute", 130)
     max_words_per_minute = request.get("maxWordsPerMinute", 190)
     max_tempo_adjustment = request.get("maxTempoAdjustment", 0.15)
+    checkpoint_dir = request.get("checkpointDir")
+    retry_epoch = request.get("retryEpoch", 0)
     generation = request.get("generation")
     if not isinstance(segments, list) or not segments:
         raise ValueError("Chatterbox needs at least one narration segment.")
@@ -264,6 +633,14 @@ def main() -> None:
         validated_segments.append((text.strip(), int(round(pause_ms))))
     if not isinstance(sample_path, str) or not sample_path:
         raise ValueError("Chatterbox needs a local reference recording.")
+    if not isinstance(checkpoint_dir, str) or not checkpoint_dir.strip():
+        raise ValueError("Chatterbox needs a segment checkpoint directory.")
+    if (
+        isinstance(retry_epoch, bool)
+        or not isinstance(retry_epoch, int)
+        or not 0 <= retry_epoch <= 3
+    ):
+        raise ValueError("Invalid Chatterbox retry epoch.")
 
     if device == "mps" and not torch.backends.mps.is_available():
         device = "cpu"
@@ -271,151 +648,71 @@ def main() -> None:
     # A/B testing confirmed exaggeration is inert in pinned Turbo 0.1.7;
     # reverify that behavior before adding it when upgrading Chatterbox.
     model.prepare_conditionals(sample_path)
+    prepare_checkpoint_directory(
+        checkpoint_dir,
+        checkpoint_fingerprint(request),
+    )
 
     parts = []
     for index, (cleaned_text, pause_ms) in enumerate(validated_segments):
-        last_error = None
-        generated = None
-        slow_fallback = None
-        fast_fallback = None
-        for attempt in range(3):
-            seed = 42 + index * 17 + attempt
-            torch.manual_seed(seed)
-            candidate = model.generate(
-                cleaned_text,
-                repetition_penalty=float(repetition_penalty),
-                temperature=float(temperature),
-                top_p=float(top_p),
-            ).detach().cpu()
+        checkpoint_path = os.path.join(
+            checkpoint_dir,
+            f"segment-{index:04d}.wav",
+        )
+        generated = load_segment_checkpoint(
+            checkpoint_path,
+            cleaned_text,
+            model.sr,
+        )
+        if generated is not None:
             duration, word_count, words_per_minute = segment_speech_metrics(
-                candidate,
+                generated,
                 cleaned_text,
                 model.sr,
             )
-            try:
-                validate_generated_audio(candidate, cleaned_text, model.sr)
-                if should_prefer_slow_fallback(
-                    words_per_minute,
-                    slow_fallback[5] if slow_fallback is not None else None,
-                    min_words_per_minute,
-                    max_tempo_adjustment,
-                ):
-                    slow_fallback = (
-                        candidate,
-                        attempt + 1,
-                        seed,
-                        duration,
-                        word_count,
-                        words_per_minute,
-                    )
-                if should_prefer_fast_fallback(
-                    words_per_minute,
-                    fast_fallback[5] if fast_fallback is not None else None,
-                    max_words_per_minute,
-                    max_tempo_adjustment,
-                ):
-                    fast_fallback = (
-                        candidate,
-                        attempt + 1,
-                        seed,
-                        duration,
-                        word_count,
-                        words_per_minute,
-                    )
-                validate_speaking_rate(
-                    words_per_minute,
-                    min_words_per_minute,
-                    max_words_per_minute,
-                )
-                emit_segment_diagnostic(
-                    index=index,
-                    attempt=attempt + 1,
-                    seed=seed,
-                    duration=duration,
-                    word_count=word_count,
-                    words_per_minute=words_per_minute,
-                    min_words_per_minute=min_words_per_minute,
-                    max_words_per_minute=max_words_per_minute,
-                    status="accepted",
-                    text=cleaned_text,
-                )
-                generated = candidate
-                break
-            except ValueError as error:
-                last_error = error
-                emit_segment_diagnostic(
-                    index=index,
-                    attempt=attempt + 1,
-                    seed=seed,
-                    duration=duration,
-                    word_count=word_count,
-                    words_per_minute=words_per_minute,
-                    min_words_per_minute=min_words_per_minute,
-                    max_words_per_minute=max_words_per_minute,
-                    status="rejected",
-                    text=cleaned_text,
-                    reason=str(error),
-                )
-        if generated is None and slow_fallback is not None:
-            (
-                generated,
-                fallback_attempt,
-                fallback_seed,
-                fallback_duration,
-                fallback_word_count,
-                fallback_words_per_minute,
-            ) = slow_fallback
             emit_segment_diagnostic(
                 index=index,
-                attempt=fallback_attempt,
-                seed=fallback_seed,
-                duration=fallback_duration,
-                word_count=fallback_word_count,
-                words_per_minute=fallback_words_per_minute,
+                attempt=0,
+                seed=0,
+                duration=duration,
+                word_count=word_count,
+                words_per_minute=words_per_minute,
                 min_words_per_minute=min_words_per_minute,
                 max_words_per_minute=max_words_per_minute,
-                status="accepted_slow_fallback",
+                status="reused_checkpoint",
                 text=cleaned_text,
-                reason=(
-                    "Clear audio selected after retries as the fastest candidate "
-                    f"within the bounded {max_tempo_adjustment:.0%} slow-rate tolerance."
-                ),
             )
-        if generated is None and slow_fallback is None and fast_fallback is not None:
-            (
-                generated,
-                fallback_attempt,
-                fallback_seed,
-                fallback_duration,
-                fallback_word_count,
-                fallback_words_per_minute,
-            ) = fast_fallback
-            emit_segment_diagnostic(
+        else:
+            generated = generate_validated_segment(
+                model=model,
+                text=cleaned_text,
                 index=index,
-                attempt=fallback_attempt,
-                seed=fallback_seed,
-                duration=fallback_duration,
-                word_count=fallback_word_count,
-                words_per_minute=fallback_words_per_minute,
+                retry_epoch=retry_epoch,
+                repetition_penalty=float(repetition_penalty),
+                temperature=float(temperature),
+                top_p=float(top_p),
                 min_words_per_minute=min_words_per_minute,
                 max_words_per_minute=max_words_per_minute,
-                status="accepted_fast_fallback",
-                text=cleaned_text,
-                reason=(
-                    "Clear audio selected after retries as the slowest over-limit "
-                    "candidate within the bounded near-limit rate tolerance."
-                ),
+                max_tempo_adjustment=max_tempo_adjustment,
             )
-        if generated is None:
-            raise ValueError(
-                f"Chatterbox could not produce clear audio for chunk {index + 1}: {last_error}"
+            save_segment_checkpoint(
+                checkpoint_path,
+                generated,
+                model.sr,
             )
         parts.append(generated)
         if index < len(validated_segments) - 1 and pause_ms > 0:
             pause_samples = int(model.sr * pause_ms / 1000)
             parts.append(torch.zeros((1, pause_samples), dtype=torch.float32))
 
-    torchaudio.save(sys.argv[2], torch.cat(parts, dim=1), model.sr)
+    temporary_output = f"{sys.argv[2]}.tmp-{os.getpid()}.wav"
+    torchaudio.save(
+        temporary_output,
+        torch.cat(parts, dim=1),
+        model.sr,
+        format="wav",
+    )
+    os.replace(temporary_output, sys.argv[2])
 
 
 if __name__ == "__main__":

@@ -100,6 +100,7 @@ import {
   openAiSpeechModelSupportsInstructions,
   PODCAST_AUDIO_DELIVERY_INSTRUCTION,
   PODCAST_HOST_STYLE_INSTRUCTION,
+  podcastStyleFailureMessage,
   removeAiProductionDisclosures,
   withPodcastHostStyle,
 } from "../lib/podcast-style.ts";
@@ -876,6 +877,10 @@ test("macOS narration and duration correction preserve natural pacing", () => {
 
 test("shared podcast prompts require a human male host and clean transcripts", () => {
   assert.match(PODCAST_HOST_STYLE_INSTRUCTION, /adult male podcast host/);
+  assert.match(
+    PODCAST_HOST_STYLE_INSTRUCTION,
+    /Never use "To understand X, we need to look at Y,"/,
+  );
   assert.match(PODCAST_HOST_STYLE_INSTRUCTION, /Never include stage directions/);
   assert.match(
     PODCAST_HOST_STYLE_INSTRUCTION,
@@ -914,6 +919,10 @@ test("Ollama uses the supplied KernelZero section-writing contract", () => {
   assert.match(
     KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
     /"That's today's episode of KernelZero\."[\s\S]*"Until next time, stay curious\."/,
+  );
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /Never use "To understand\.\.\." as a stock bridge/,
   );
   assert.match(
     KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
@@ -2949,6 +2958,77 @@ test("generation rewrites an intro-sized response before creating an episode", a
     else process.env.OPENAI_API_KEY = originalOpenAiKey;
     if (originalSkipVerification === undefined) delete process.env.SKIP_EVIDENCE_VERIFICATION;
     else process.env.SKIP_EVIDENCE_VERIFICATION = originalSkipVerification;
+  }
+});
+
+test("generation repairs a stock transition before persisting the podcast", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalProvider = process.env.AI_PROVIDER;
+  const originalOpenAiKey = process.env.OPENAI_API_KEY;
+  const originalSkipVerification = process.env.SKIP_EVIDENCE_VERIFICATION;
+  const requests: RequestInit[] = [];
+  const stockOpening =
+    "To understand the current landscape, we need to look at how infrastructure is evolving.";
+  const concreteOpening =
+    "Outbound network controls are changing how agents can reach external infrastructure.";
+  const scriptWith = (opening: string) =>
+    `${opening} ${Array.from({ length: 405 - countScriptWords(opening) }, (_, index) => `detail${index}`).join(" ")}`;
+  const packageFor = (script: string) => ({
+    title: "Style checked",
+    dek: "A concrete briefing.",
+    script,
+    showNotes: "Source: https://example.com/paper",
+    chapters: [{ title: "Opening", startSeconds: 0 }],
+    claims: [],
+  });
+  const responses = [
+    packageFor(scriptWith(stockOpening)),
+    packageFor(scriptWith(concreteOpening)),
+  ];
+
+  process.env.AI_PROVIDER = "openai";
+  process.env.OPENAI_API_KEY = "test-key";
+  process.env.SKIP_EVIDENCE_VERIFICATION = "true";
+  globalThis.fetch = (async (_input, init) => {
+    requests.push(init ?? {});
+    const response = responses.shift();
+    assert.notEqual(response, undefined);
+    return new Response(
+      JSON.stringify({ output_text: JSON.stringify(response) }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const generated = await generatePodcast([item()], "daily_digest", {
+      includeAudio: false,
+      episodeLength: "brief",
+    });
+
+    assert.equal(requests.length, 2);
+    assert.equal(
+      podcastStyleFailureMessage(generated.episode.script),
+      null,
+    );
+    assert.ok(generated.episode.script.startsWith(concreteOpening));
+    const repairBody = JSON.parse(String(requests[1].body)) as {
+      input: Array<{ content: Array<{ text: string }> }>;
+    };
+    assert.match(
+      repairBody.input[1].content[0].text,
+      /Podcast style validation failed/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalProvider === undefined) delete process.env.AI_PROVIDER;
+    else process.env.AI_PROVIDER = originalProvider;
+    if (originalOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalOpenAiKey;
+    if (originalSkipVerification === undefined) {
+      delete process.env.SKIP_EVIDENCE_VERIFICATION;
+    } else {
+      process.env.SKIP_EVIDENCE_VERIFICATION = originalSkipVerification;
+    }
   }
 });
 

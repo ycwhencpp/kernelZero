@@ -11,6 +11,7 @@ Write the spoken script for one warm, credible adult male podcast host explainin
 - Keep the transcript clean. Never include stage directions, emotion labels, bracketed performance cues, SSML, headings, bullets, URLs, or spoken citation numbers.
 - Never tell the listener that the episode, podcast, script, transcript, production, or narration was written, generated, produced, or narrated by or with AI.
 - Do not announce internal section names, repeat a fact as a recap, force jokes, manufacture hype, or use generic AI transitions such as "in today's fast-paced world," "it is important to note," or "let's delve into."
+- Never use "To understand X, we need to look at Y," "To understand how X works, we have to look at Y," or close variants as stock transitions. State the concrete next idea directly.
 `.trim();
 
 export const PODCAST_AUDIO_DELIVERY_INSTRUCTION = `
@@ -18,6 +19,15 @@ Perform this as a close-mic adult male podcast host speaking to one listener. Us
 
 Follow the meaning of each passage: add a subtle lift in energy and intonation for genuine surprise or excitement; become slower, softer, and more sober for harm, loss, uncertainty, or disappointing news; use firmer emphasis only for important conclusions. Leave short breaths between thoughts and a longer pause after revelations or topic changes. Do not overact, add words, read labels or directions aloud, or turn the performance into a trailer voice.
 `.trim();
+
+const STOCK_PODCAST_TRANSITION =
+  /\bto understand(?:\s+how)?\s+[^.!?\n]{1,160},\s+we\s+(?:need|have)\s+to\s+look\s+at\b/i;
+
+export function podcastStyleFailureMessage(script: string): string | null {
+  const stockTransition = script.match(STOCK_PODCAST_TRANSITION)?.[0];
+  if (!stockTransition) return null;
+  return `Podcast style validation failed: replace the canned transition "${stockTransition}" with the concrete mechanism, event, or finding that comes next.`;
+}
 
 export function withPodcastHostStyle(instruction: string): string {
   return `${instruction.trim()}\n\n${PODCAST_HOST_STYLE_INSTRUCTION}`;

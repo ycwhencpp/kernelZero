@@ -159,6 +159,12 @@ Avoid repeatedly using phrases like:
 
 "On the other hand..."
 
+"To understand X, we need to look at Y..."
+
+"To understand how X works, we have to look at Y..."
+
+Never use "To understand..." as a stock bridge. State the concrete mechanism, event, or finding that comes next.
+
 --------------------------------------------------
 EXPLAINING TECHNICAL IDEAS
 --------------------------------------------------

@@ -36,6 +36,7 @@ import {
 import {
   openAiSpeechModelSupportsInstructions,
   PODCAST_AUDIO_DELIVERY_INSTRUCTION,
+  podcastStyleFailureMessage,
   removeAiProductionDisclosures,
   withPodcastHostStyle,
 } from "./podcast-style";
@@ -397,11 +398,11 @@ async function runEvidenceVerification(
   }
 }
 
-async function repairRepetition(
+async function repairNarrativeIssues(
   provider: "openai" | "gemini" | "ollama",
   generated: PodcastDraft,
   items: ContentItem[],
-  repetitionFailure: string,
+  narrativeFailure: string,
   episodeType: Episode["type"],
   episodeLength: EpisodeLength,
 ): Promise<PodcastDraft> {
@@ -409,7 +410,7 @@ async function repairRepetition(
     ? gemini.repairStructuredPodcast(
         generated,
         items,
-        repetitionFailure,
+        narrativeFailure,
         episodeType,
         episodeLength,
       )
@@ -417,14 +418,14 @@ async function repairRepetition(
       ? ollama.repairStructuredPodcast(
           generated,
           items,
-          repetitionFailure,
+          narrativeFailure,
           episodeType,
           episodeLength,
         )
       : repairStructuredPodcast(
           generated,
           items,
-          repetitionFailure,
+          narrativeFailure,
           episodeType,
           episodeLength,
         );
@@ -521,21 +522,31 @@ export async function generatePodcast(
       script: removeAiProductionDisclosures(generated.script),
     };
     const repetitionIssues = findRepeatedParagraphs(generated.script);
+    const styleFailure = podcastStyleFailureMessage(generated.script);
     if (
       scriptMatchesEpisodeLength(generated.script, episodeLength) &&
-      repetitionIssues.length === 0
+      repetitionIssues.length === 0 &&
+      styleFailure === null
     ) {
       break;
     }
-    if (repetitionIssues.length) {
+    if (repetitionIssues.length || styleFailure) {
+      const narrativeFailure = [
+        repetitionIssues.length
+          ? repetitionFailureMessage(repetitionIssues)
+          : null,
+        styleFailure,
+      ]
+        .filter((failure): failure is string => Boolean(failure))
+        .join("\n");
       if (cycle >= 2) {
-        throw new Error(repetitionFailureMessage(repetitionIssues));
+        throw new Error(narrativeFailure);
       }
-      generated = await repairRepetition(
+      generated = await repairNarrativeIssues(
         provider,
         generated,
         items,
-        repetitionFailureMessage(repetitionIssues),
+        narrativeFailure,
         type,
         episodeLength,
       );
@@ -555,6 +566,10 @@ export async function generatePodcast(
   const remainingRepetition = findRepeatedParagraphs(generated.script);
   if (remainingRepetition.length) {
     throw new Error(repetitionFailureMessage(remainingRepetition));
+  }
+  const remainingStyleFailure = podcastStyleFailureMessage(generated.script);
+  if (remainingStyleFailure) {
+    throw new Error(remainingStyleFailure);
   }
 
   const now = new Date().toISOString();
