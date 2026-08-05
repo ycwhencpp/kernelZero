@@ -204,6 +204,29 @@ export function selectTopItemPerSource(
     .filter((item): item is ContentItem => Boolean(item));
 }
 
+export function sourceSelectionCoverage(
+  items: ContentItem[],
+  sourceIds: string[],
+): {
+  selectedItems: ContentItem[];
+  selectedSourceCount: number;
+  readySourceCount: number;
+  unavailableSourceCount: number;
+} {
+  const uniqueSourceIds = [...new Set(sourceIds)];
+  const selectedItems = selectTopItemPerSource(items, uniqueSourceIds);
+
+  return {
+    selectedItems,
+    selectedSourceCount: uniqueSourceIds.length,
+    readySourceCount: selectedItems.length,
+    unavailableSourceCount: Math.max(
+      0,
+      uniqueSourceIds.length - selectedItems.length,
+    ),
+  };
+}
+
 export function hasBudgetForGeneration(
   spentUsd: number,
   budgetUsd: number,

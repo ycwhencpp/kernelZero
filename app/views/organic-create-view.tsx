@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { selectTopItemPerSource } from "../../lib/domain";
+import { sourceSelectionCoverage } from "../../lib/domain";
 import { episodeLengthProfile } from "../../lib/podcast-length";
 import type { DashboardState, EpisodeLength } from "../../lib/types";
 
@@ -19,15 +19,28 @@ export function OrganicCreateView({
   busy: string | null;
 }) {
   const sources = state.sources;
-  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(sources.slice(0, 2).map((source) => source.id));
+  const sourceIdsWithContent = useMemo(
+    () =>
+      new Set(
+        state.items.flatMap((item) => item.sourceId ? [item.sourceId] : []),
+      ),
+    [state.items],
+  );
+  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(() =>
+    sources
+      .filter((source) => sourceIdsWithContent.has(source.id))
+      .slice(0, 2)
+      .map((source) => source.id),
+  );
   const [depth, setDepth] = useState<EpisodeLength>(state.settings.episodeLength);
   const [generationTime, setGenerationTime] = useState("08:00");
   const [weekdays, setWeekdays] = useState([true, true, true, true, true, false, false]);
   const [distribution, setDistribution] = useState({ spotify: true, apple: false });
-  const selectedItems = useMemo(
-    () => selectTopItemPerSource(state.items, selectedSourceIds),
+  const sourceSelection = useMemo(
+    () => sourceSelectionCoverage(state.items, selectedSourceIds),
     [state.items, selectedSourceIds],
   );
+  const selectedItems = sourceSelection.selectedItems;
   const allSourcesSelected =
     sources.length > 0 && sources.every((source) => selectedSourceIds.includes(source.id));
 
@@ -77,6 +90,7 @@ export function OrganicCreateView({
           <div className="organic-source-pick-grid">
             {sources.map((source) => {
               const selected = selectedSourceIds.includes(source.id);
+              const hasContent = sourceIdsWithContent.has(source.id);
               return (
               <button
                 key={source.id}
@@ -93,13 +107,20 @@ export function OrganicCreateView({
               >
                 {selected && <span className="check">✓</span>}
                 <strong>{source.name}</strong>
-                <small>{source.type.toUpperCase()}</small>
+                <small>
+                  {source.type.toUpperCase()} · {hasContent ? "READY" : "NO CONTENT"}
+                </small>
               </button>
             ); })}
             <button type="button" className="organic-source-pick dashed" onClick={onAddSource}>
               Connect New Source
             </button>
           </div>
+          {sourceSelection.unavailableSourceCount > 0 && (
+            <p className="organic-panel-copy" role="status">
+              {sourceSelection.unavailableSourceCount} selected {sourceSelection.unavailableSourceCount === 1 ? "source has" : "sources have"} no imported content yet and will be skipped. Refresh them from Sources.
+            </p>
+          )}
         </article>
 
         <article className="organic-panel dark">
@@ -162,8 +183,22 @@ export function OrganicCreateView({
           <h3>Briefing Summary</h3>
           <ul>
             <li>
-              <span>Sources Active</span>
-              <strong>{selectedSourceIds.length} Connected</strong>
+              <span>Sources Selected</span>
+              <strong>{sourceSelection.selectedSourceCount}</strong>
+            </li>
+            <li>
+              <span>Ready Sources</span>
+              <strong>{sourceSelection.readySourceCount}</strong>
+            </li>
+            {sourceSelection.unavailableSourceCount > 0 && (
+              <li>
+                <span>Awaiting Content</span>
+                <strong>{sourceSelection.unavailableSourceCount}</strong>
+              </li>
+            )}
+            <li>
+              <span>Selection Rule</span>
+              <strong>Top item per source</strong>
             </li>
             <li>
               <span>Estimated Length</span>
@@ -180,7 +215,11 @@ export function OrganicCreateView({
             disabled={busy !== null || selectedItems.length === 0}
             onClick={() => onStart(selectedItems.map((item) => item.id), depth)}
           >
-            {busy ? "Starting…" : selectedItems.length ? `START PIPELINE (${selectedItems.length} items)` : "START PIPELINE"}
+            {busy
+              ? "Starting…"
+              : selectedItems.length
+                ? `START PIPELINE (${selectedItems.length} ready sources)`
+                : "START PIPELINE"}
           </button>
           <button type="button" className="organic-btn organic-btn-outline block" onClick={() => onStart(selectedItems.slice(0, 1).map((item) => item.id), depth)} disabled={busy !== null || selectedItems.length === 0}>
             Generate Preview

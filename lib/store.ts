@@ -2,6 +2,7 @@ import { buildTechRadar } from "./domain";
 import { mediaUrl } from "./media-path";
 import { normalizeEpisodeLength } from "./podcast-length";
 import { normalizeEvidenceConfidence } from "./podcast-schema";
+import { loadAllPaginatedRows } from "./supabase-pagination";
 import { getSupabase, MEDIA_BUCKET } from "./supabase";
 import type { Collection, ContentItem, DashboardState, Episode, EvidenceClaim, InterestProfile, JobRun, Source, VoiceProfile, WorkspaceSettings } from "./types";
 
@@ -65,7 +66,7 @@ function emptyState(): DashboardState {
 export async function getDashboardState(ownerId: string): Promise<DashboardState> {
   const db = await requireDb(); if (!db) return emptyState(); await ensureOwner(ownerId);
   const [interests, sources, items, collections, episodes, jobs, profile, voiceProfiles] = await Promise.all([
-    db.from("interest_profiles").select().eq("owner_id", ownerId).order("weight", { ascending: false }), db.from("sources").select().eq("owner_id", ownerId).order("name"), db.from("content_items").select().eq("owner_id", ownerId).order("score", { ascending: false }).order("published_at", { ascending: false }), db.from("collections").select().eq("owner_id", ownerId), db.from("episodes").select().eq("owner_id", ownerId).order("created_at", { ascending: false }), db.from("job_runs").select().eq("owner_id", ownerId).order("started_at", { ascending: false }).limit(20), db.from("profiles").select().eq("id", ownerId).single(), db.from("voice_profiles").select().eq("owner_id", ownerId).order("created_at", { ascending: false }),
+    db.from("interest_profiles").select().eq("owner_id", ownerId).order("weight", { ascending: false }), db.from("sources").select().eq("owner_id", ownerId).order("name"), loadAllPaginatedRows<Row>((from, to) => db.from("content_items").select().eq("owner_id", ownerId).order("score", { ascending: false }).order("published_at", { ascending: false }).order("id").range(from, to)), db.from("collections").select().eq("owner_id", ownerId), db.from("episodes").select().eq("owner_id", ownerId).order("created_at", { ascending: false }), db.from("job_runs").select().eq("owner_id", ownerId).order("started_at", { ascending: false }).limit(20), db.from("profiles").select().eq("id", ownerId).single(), db.from("voice_profiles").select().eq("owner_id", ownerId).order("created_at", { ascending: false }),
   ]);
   if (interests.error || sources.error || items.error || episodes.error) throw new Error(interests.error?.message || sources.error?.message || items.error?.message || episodes.error?.message || "Unable to load Supabase state.");
   const mappedItems = (items.data ?? []).map(mapItem); const mappedEpisodes = (episodes.data ?? []).map(mapEpisode);
