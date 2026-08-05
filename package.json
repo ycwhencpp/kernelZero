@@ -10,7 +10,7 @@
     "build": "next build",
     "start": "next start",
     "test": "npm run test:unit && npm run build",
-    "test:unit": "node --import tsx --test tests/core.test.ts",
+    "test:unit": "node --import tsx --test tests/core.test.ts tests/ollama-resilience.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:migrate": "supabase db push"
   },

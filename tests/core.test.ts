@@ -400,13 +400,16 @@ test("standard episode length is enforced as a complete nine-minute script", () 
     { length: 1_183 },
     () => "word",
   ).join(" ");
-  const tooShortScript = Array.from({ length: 1_114 }, () => "word").join(" ");
+  const toleratedShortScript = Array.from(
+    { length: 1_114 },
+    () => "word",
+  ).join(" ");
   assert.match(instruction, /9-minute/);
   assert.match(instruction, /Target 1,215–1,485 spoken words/);
-  assert.match(instruction, /soft deviation of up to 100 words/);
+  assert.match(instruction, /soft deviation of up to 15%/);
   assert.deepEqual(episodeLengthAcceptanceRange("standard"), {
-    minWords: 1_115,
-    maxWords: 1_585,
+    minWords: 1_033,
+    maxWords: 1_707,
   });
   assert.equal(countScriptWords(validScript), 1_350);
   assert.equal(scriptMatchesEpisodeLength(validScript, "standard"), true);
@@ -414,7 +417,17 @@ test("standard episode length is enforced as a complete nine-minute script", () 
     scriptMatchesEpisodeLength(slightlyShortScript, "standard"),
     true,
   );
-  assert.equal(scriptMatchesEpisodeLength(tooShortScript, "standard"), false);
+  assert.equal(
+    scriptMatchesEpisodeLength(toleratedShortScript, "standard"),
+    true,
+  );
+  assert.equal(
+    scriptMatchesEpisodeLength(
+      Array.from({ length: 1_032 }, () => "word").join(" "),
+      "standard",
+    ),
+    false,
+  );
   assert.equal(estimateScriptDurationSeconds(validScript), 540);
   assert.equal(scriptMatchesEpisodeLength("Only an introduction.", "standard"), false);
 });
@@ -3013,7 +3026,7 @@ test("Ollama critics repair a new evidence issue that appears on a late audit", 
                 { length: sectionWords[sectionNumber - 1] - reservedWords },
                 () => `section${sectionNumber}revision${revision}`,
               ),
-            ].join(" "),
+            ].join(" ") + ".",
         claims: [],
       });
     }
@@ -3147,7 +3160,7 @@ test("Ollama stops after two repairs of the same evidence issue", async () => {
                 { length: sectionWords[sectionNumber - 1] - reservedWords },
                 () => `section${sectionNumber}word`,
               ),
-            ].join(" "),
+            ].join(" ") + ".",
         claims: [],
       });
     }

@@ -6,11 +6,11 @@ export type EpisodeLengthProfile = {
   maxWords: number;
 };
 
-export const EPISODE_LENGTH_SOFT_TOLERANCE_WORDS = 100;
+export const PODCAST_LENGTH_SOFT_TOLERANCE_RATIO = 0.15;
 
 // Spoken narration averages roughly 150 words per minute. These are the target
-// bands; validation adds the small absolute buffer above so near misses do not
-// fail an otherwise complete episode.
+// bands; validation applies the shared proportional tolerance above so near
+// misses behave consistently across every episode length.
 const profiles: Record<EpisodeLength, EpisodeLengthProfile> = {
   brief: {
     minutes: 3,
@@ -46,17 +46,27 @@ export function countScriptWords(script: string): number {
   return script.trim() ? script.trim().split(/\s+/).length : 0;
 }
 
+export function podcastWordAcceptanceRange(
+  minWords: number,
+  maxWords: number,
+): { minWords: number; maxWords: number } {
+  return {
+    minWords: Math.max(
+      1,
+      Math.ceil(minWords * (1 - PODCAST_LENGTH_SOFT_TOLERANCE_RATIO)),
+    ),
+    maxWords: Math.max(
+      1,
+      Math.floor(maxWords * (1 + PODCAST_LENGTH_SOFT_TOLERANCE_RATIO)),
+    ),
+  };
+}
+
 export function episodeLengthAcceptanceRange(
   length: EpisodeLength,
 ): { minWords: number; maxWords: number } {
   const profile = profiles[length];
-  return {
-    minWords: Math.max(
-      1,
-      profile.minWords - EPISODE_LENGTH_SOFT_TOLERANCE_WORDS,
-    ),
-    maxWords: profile.maxWords + EPISODE_LENGTH_SOFT_TOLERANCE_WORDS,
-  };
+  return podcastWordAcceptanceRange(profile.minWords, profile.maxWords);
 }
 
 export function scriptMatchesEpisodeLength(script: string, length: EpisodeLength): boolean {
@@ -71,7 +81,7 @@ export function episodeLengthInstruction(
 ): string {
   const profile = profiles[length];
   const accepted = episodeLengthAcceptanceRange(length);
-  return `Create a complete ${profile.minutes}-minute ${type.replaceAll("_", " ")}. Target ${profile.minWords.toLocaleString("en-US")}–${profile.maxWords.toLocaleString("en-US")} spoken words. A soft deviation of up to ${EPISODE_LENGTH_SOFT_TOLERANCE_WORDS} words is allowed only when needed, so the final accepted range is ${accepted.minWords.toLocaleString("en-US")}–${accepted.maxWords.toLocaleString("en-US")} words. Aim for the target range rather than the tolerance boundary. Cover the full requested arc and end with a complete conclusion; never return only an introduction or an unfinished sentence.`;
+  return `Create a complete ${profile.minutes}-minute ${type.replaceAll("_", " ")}. Target ${profile.minWords.toLocaleString("en-US")}–${profile.maxWords.toLocaleString("en-US")} spoken words. A soft deviation of up to ${Math.round(PODCAST_LENGTH_SOFT_TOLERANCE_RATIO * 100)}% beyond either target boundary is allowed only when needed, so the final accepted range is ${accepted.minWords.toLocaleString("en-US")}–${accepted.maxWords.toLocaleString("en-US")} words. Aim for the target range rather than the tolerance boundary. Cover the full requested arc and end with a complete conclusion; never return only an introduction or an unfinished sentence.`;
 }
 
 export function estimateScriptDurationSeconds(script: string): number {
