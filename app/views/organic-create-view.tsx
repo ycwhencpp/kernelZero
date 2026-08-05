@@ -28,6 +28,8 @@ export function OrganicCreateView({
     () => selectTopItemPerSource(state.items, selectedSourceIds),
     [state.items, selectedSourceIds],
   );
+  const allSourcesSelected =
+    sources.length > 0 && sources.every((source) => selectedSourceIds.includes(source.id));
 
   return (
     <div className="organic-create">
@@ -53,7 +55,25 @@ export function OrganicCreateView({
 
       <div className="organic-create-grid">
         <article className="organic-panel">
-          <h3>Source Selection</h3>
+          <div className="organic-panel-head">
+            <h3>Source Selection</h3>
+            <button
+              type="button"
+              className="organic-text-link lime"
+              aria-pressed={allSourcesSelected}
+              disabled={sources.length === 0}
+              onClick={() =>
+                setSelectedSourceIds((current) => {
+                  const selectedIds = new Set(current);
+                  const hasEverySource = sources.every((source) => selectedIds.has(source.id));
+
+                  return hasEverySource ? [] : sources.map((source) => source.id);
+                })
+              }
+            >
+              {allSourcesSelected ? "Clear all" : "Select all"}
+            </button>
+          </div>
           <div className="organic-source-pick-grid">
             {sources.map((source) => {
               const selected = selectedSourceIds.includes(source.id);
@@ -62,7 +82,14 @@ export function OrganicCreateView({
                 key={source.id}
                 type="button"
                 className={`organic-source-pick ${selected ? "is-selected" : ""}`}
-                onClick={() => setSelectedSourceIds((current) => selected ? current.filter((id) => id !== source.id) : [...current, source.id])}
+                aria-pressed={selected}
+                onClick={() =>
+                  setSelectedSourceIds((current) =>
+                    current.includes(source.id)
+                      ? current.filter((id) => id !== source.id)
+                      : [...current, source.id],
+                  )
+                }
               >
                 {selected && <span className="check">✓</span>}
                 <strong>{source.name}</strong>
@@ -150,7 +177,7 @@ export function OrganicCreateView({
           <button
             type="button"
             className="organic-btn organic-btn-dark block"
-            disabled={busy !== null}
+            disabled={busy !== null || selectedItems.length === 0}
             onClick={() => onStart(selectedItems.map((item) => item.id), depth)}
           >
             {busy ? "Starting…" : selectedItems.length ? `START PIPELINE (${selectedItems.length} items)` : "START PIPELINE"}
