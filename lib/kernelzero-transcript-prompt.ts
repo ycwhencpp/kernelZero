@@ -38,27 +38,27 @@ OPENING
 
 Structure:
 
-1. Begin with an original attention-grabbing observation, engineering paradox, surprising comparison, contradiction, or relatable real-world situation.
+1. Begin with this exact line:
+
+"Welcome to KernelZero."
+
+This must be the first spoken sentence.
+
+2. In the next one or two sentences, identify today's concrete topic or story and tell the listener what they will understand and why it matters.
+
+Make this setup specific to the episode. Vary the sentence structure instead of copying the same "Today we're..." formula every time.
+
+Name the load-bearing organization, product, model, benchmark, paper, or incident when it is needed to tell the listener what this episode is actually about. Do not give numbers, methods, results, or detailed findings before this orientation is complete.
+
+Keep the greeting and these orientation sentences together as the first paragraph. Then insert a blank line before the hook and technical story begin.
+
+3. Continue with an original attention-grabbing observation, engineering paradox, surprising comparison, contradiction, or relatable real-world situation that naturally leads into the story.
 
 Avoid generic hooks like:
 "Have you ever wondered..."
 "Let's dive in..."
 "It is fascinating..."
 "In today's fast-paced world..."
-
-2. Then introduce the show using this exact line:
-
-"Welcome to KernelZero."
-
-3. Introduce today's topic naturally.
-
-Examples:
-
-"Today we're exploring..."
-"Today we're unpacking..."
-"Today we're taking a closer look at..."
-
-Vary this wording every episode.
 
 4. Transition naturally into the rest of the section.
 
@@ -312,11 +312,11 @@ SECTION RESPONSIBILITIES
 
 Why This Matters
 
-Open with curiosity.
+Open with the branded greeting and episode-specific listener orientation, then build curiosity.
 
 Explain why listeners should care.
 
-Do NOT mention specific products, models, benchmarks, datasets, implementations, or numbers.
+Name the load-bearing organizations, products, models, benchmarks, papers, or incidents needed to identify the episode. Reserve their methods, numbers, results, and detailed findings for the sections that own them.
 
 Apply the OPENING structure.
 

@@ -182,7 +182,7 @@ async function createStructuredPodcast(
               type: "input_text",
               text: `${episodeLengthInstruction(episodeType, episodeLength)}
 
-Required arc: why it matters; background; method or mechanism; findings; limitations; practical impact; what to watch next. Begin the spoken script with a concrete human hook. Build depth through clear explanations, source-by-source comparisons, transitions, and uncertainty—not repetition or invented facts. A fact is already covered even if another source describes it in different words. Do not repeat an event, example, number, mechanism, finding, or explanation across paragraphs. Do not read citations aloud, but make show notes source-complete. The claim ledger must cover every quantitative or attributed claim.
+Required arc: why it matters; background; method or mechanism; findings; limitations; practical impact; what to watch next. Begin with the required KernelZero greeting and an episode-specific orientation that tells listeners what story they are about to hear, what they will understand, and why it matters before introducing technical details. Build depth through clear explanations, source-by-source comparisons, transitions, and uncertainty—not repetition or invented facts. A fact is already covered even if another source describes it in different words. Do not repeat an event, example, number, mechanism, finding, or explanation across paragraphs. Do not read citations aloud, but make show notes source-complete. The claim ledger must cover every quantitative or attributed claim.
 ${podcastRegenerationInstruction(regeneration)}
 
 SOURCE PACKET:

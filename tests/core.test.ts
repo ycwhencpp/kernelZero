@@ -76,7 +76,9 @@ import {
   mapWithConcurrency,
   normalizePodcastPlan,
   planSectionExpansions,
+  podcastDraftSectionsForRevision,
   podcastPlanFactCardLimit,
+  podcastSectionRevisionFeedback,
   trimNarrationToCompleteSentences,
 } from "../lib/ollama.ts";
 import {
@@ -545,6 +547,23 @@ test("cross-section dedup never inserts spaces into model versions", () => {
   );
 });
 
+test("cross-section dedup preserves the podcast opening paragraph", () => {
+  const opening =
+    "Welcome to KernelZero. This episode traces an agent sandbox escape, so you'll understand why outbound network boundaries matter.";
+  const repeated =
+    "The agent then reached an external service through the same missing boundary.";
+  const distinct =
+    "A separate control still blocked access to the protected internal service.";
+
+  assert.equal(
+    removeRepeatedSentencesAgainstReference(
+      `${opening}\n\n${repeated} ${distinct}`,
+      repeated,
+    ),
+    `${opening}\n\n${distinct}`,
+  );
+});
+
 test("podcast source packets reserve context for long-form output", () => {
   const items = Array.from({ length: 5 }, (_, index) =>
     item({
@@ -879,6 +898,18 @@ test("shared podcast prompts require a human male host and clean transcripts", (
   assert.match(PODCAST_HOST_STYLE_INSTRUCTION, /adult male podcast host/);
   assert.match(
     PODCAST_HOST_STYLE_INSTRUCTION,
+    /first spoken sentence must be exactly "Welcome to KernelZero\."/,
+  );
+  assert.match(
+    PODCAST_HOST_STYLE_INSTRUCTION,
+    /name the episode-specific story or topic and preview what the listener will understand and why it matters/,
+  );
+  assert.match(
+    PODCAST_HOST_STYLE_INSTRUCTION,
+    /Keep the greeting and orientation together as the first paragraph, then insert a blank line/,
+  );
+  assert.match(
+    PODCAST_HOST_STYLE_INSTRUCTION,
     /Never use "To understand X, we need to look at Y,"/,
   );
   assert.match(PODCAST_HOST_STYLE_INSTRUCTION, /Never include stage directions/);
@@ -901,6 +932,206 @@ test("shared podcast prompts require a human male host and clean transcripts", (
     true,
   );
   assert.equal(openAiSpeechModelSupportsInstructions("tts-1-hd"), false);
+  assert.equal(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode follows a sandbox escape from its first network request to the missing boundary, so you'll understand why outbound controls matter.\n\nThe technical story starts with the agent's environment.",
+    ),
+    null,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "A frontier model reached an external network. The exploit crossed a system boundary.",
+    ) ?? "",
+    /start the spoken script with the exact sentence "Welcome to KernelZero\."/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. GPT-5.4 reached an external network through a kernel flaw.",
+    ) ?? "",
+    /preview what the listener will understand and why it matters/,
+  );
+  assert.equal(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. Agent sandboxes, outbound controls, and kernel boundaries meet in one story. The next few minutes connect that path to infrastructure risk.\n\nThe story begins with an outbound request.",
+    ),
+    null,
+  );
+  assert.equal(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode examines how ExploitGym tests AI agents and why outbound restrictions are essential for infrastructure security.\n\nThe story begins with the benchmark environment.",
+    ),
+    null,
+  );
+  assert.equal(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. Today’s story shows how frontier agents cross network boundaries and why infrastructure teams need stronger outbound controls.\n\nThe first clue is an unexpected connection.",
+    ),
+    null,
+  );
+  assert.equal(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. Today, we’re looking at how ExploitGym tests frontier agents and why outbound controls matter for infrastructure teams.\n\nThe benchmark starts inside a restricted environment.",
+    ),
+    null,
+  );
+  assert.equal(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode covers how ExploitGym tests frontier agents and why outbound controls matter for infrastructure teams.\n\nThe benchmark starts inside a restricted environment.",
+    ),
+    null,
+  );
+  assert.equal(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode follows how Dr. Fei-Fei Li frames responsible AI and why that perspective matters to engineering teams.\n\nThe story starts with the design trade-off.",
+    ),
+    null,
+  );
+  for (const orientation of [
+    "This episode explores how Llama 3 changes local model deployment and why its memory footprint matters to engineering teams.",
+    "This episode explores how a landmark clinical trial changed cancer screening and why its design matters to medical teams.",
+    "This episode traces how a certificate rotation failed and why that outage matters to infrastructure teams.",
+    "This episode follows what researchers found about agent memory and why the question matters to AI engineers.",
+    "This episode traces how developers train and deploy Llama 3, so you will understand why its resource footprint matters.",
+    "This episode explores how systems encrypt and decrypt traffic, so you will understand why key rotation matters.",
+    "Today, we're looking at how shell access changes coding agents, so you'll understand why shell access needs careful controls.",
+    "This episode covers how the control plane shapes agent permissions, so you'll understand why the control plane matters for isolation.",
+    "This episode explores how a sandbox escape changes the threat model, so you'll understand why a sandbox escape matters to defenders.",
+    "This episode covers how percentage units behave in CSS and why layout engineers need to understand them.",
+    "Today, we're looking at how percent encoding works in URLs and why decoding boundaries matter to application security.",
+  ]) {
+    assert.equal(
+      podcastStyleFailureMessage(
+        `Welcome to KernelZero. ${orientation}\n\nThe story begins with the source context.`,
+      ),
+      null,
+      orientation,
+    );
+  }
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode is starting now. We'll see why.",
+    ) ?? "",
+    /12-70 spoken words total/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. GPT-5.4 exploited a kernel flaw and opened an outbound socket without permission. Researchers then tested the agent against a browser engine and recorded the result. This is body detail, not listener orientation.",
+    ) ?? "",
+    /include a concrete listener payoff/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. Researchers tested a kernel exploit against GPT-5.4, and we are reporting that it succeeded in ninety-three percent of trials.\n\nMore detail follows.",
+    ) ?? "",
+    /include a concrete listener payoff/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode covers GPT-5.4. Researchers tested it. They reported the result. You'll understand why it matters.\n\nMore detail follows.",
+    ) ?? "",
+    /exactly one or two complete sentences/,
+  );
+  for (const name of ["J. C. R. Licklider", "J. P. O’Neill", "J. P. O'Neill"]) {
+    assert.equal(
+      podcastStyleFailureMessage(
+        `Welcome to KernelZero. This episode follows how ${name} shaped interactive computing. You'll understand why those ideas still matter to modern systems.\n\nThe story begins with the early work.`,
+      ),
+      null,
+      name,
+    );
+  }
+  for (const orientation of [
+    "This episode covers how ExploitGym tests frontier agents across several sandbox environments and compares their behavior under restricted network access.",
+    "Today, we examine how OpenAI evaluates coding agents across controlled tasks and reports the resulting patterns in their behavior.",
+    "This episode covers how risk models classify agent behavior across sandbox environments and compares their outputs under controlled tasks.",
+    "This episode explains how arithmetic means are calculated across benchmark samples and compares the resulting distributions under controlled tasks.",
+    "Today, we're looking at what impact factors journals report and how researchers calculate those values across publication datasets.",
+  ]) {
+    assert.match(
+      podcastStyleFailureMessage(
+        `Welcome to KernelZero. ${orientation}\n\nMore detail follows.`,
+      ) ?? "",
+      /include a concrete listener payoff/,
+      orientation,
+    );
+  }
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode covers GPT-5.4 and recent agent benchmark results in detail. You'll understand the full story by the end.\n\nMore detail follows.",
+    ) ?? "",
+    /include a concrete listener payoff/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. Researchers tested GPT-5.4 and reported ninety-three percent success. We'll examine the exploit.\n\nMore detail follows.",
+    ) ?? "",
+    /reserve quantitative results, success rates, and detailed findings/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode examines how GPT-5.4 escaped its sandbox in ninety-three percent of trials.\n\nMore detail follows.",
+    ) ?? "",
+    /reserve quantitative results, success rates, and detailed findings/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode covers what the benchmark scored 93 out of 100 and why the result matters.\n\nMore detail follows.",
+    ) ?? "",
+    /reserve quantitative results, success rates, and detailed findings/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode explains why the model ranked first among seven systems and what the comparison means.\n\nMore detail follows.",
+    ) ?? "",
+    /reserve quantitative results, success rates, and detailed findings/,
+  );
+  for (const orientation of [
+    "This episode explains how GPT-5.4 ranked first overall and why the result matters to benchmark readers.",
+    "This episode explains how GPT-5.4 ranked first on ExploitGym and why the result matters to agent developers.",
+    "This episode explains how GPT-5.4 ranked first in ExploitGym and why the result matters to agent developers.",
+    "This episode explains how GPT-5.4 solved 87 of 100 tasks and why the result matters to agent developers.",
+  ]) {
+    assert.match(
+      podcastStyleFailureMessage(
+        `Welcome to KernelZero. ${orientation}\n\nMore detail follows.`,
+      ) ?? "",
+      /reserve quantitative results, success rates, and detailed findings/,
+      orientation,
+    );
+  }
+  for (const orientation of [
+    "This episode explains how GPT-5.4 escaped its sandbox by exploiting CVE-2025-1234, opened an outbound socket, and reached a private control plane, and why that chain matters.",
+    "This episode explains how an agent exploited a kernel flaw, disabled the outbound filter, and exfiltrated credentials, and why that chain matters.",
+    "This episode traces how browser automation, shell access, and unrestricted networking changed the agent's risk profile, so you'll understand why the environment mattered.",
+  ]) {
+    assert.match(
+      podcastStyleFailureMessage(
+        `Welcome to KernelZero. ${orientation}\n\nMore detail follows.`,
+      ) ?? "",
+      /move vulnerability identifiers and multi-step technical mechanisms/,
+      orientation,
+    );
+  }
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode examines how an agent crosses a sandbox boundary and why outbound controls matter.\n\nThe mechanism begins here. Welcome to KernelZero.",
+    ) ?? "",
+    /exactly once, at the start of the script/,
+  );
+  assert.match(
+    podcastStyleFailureMessage(
+      "Welcome to KernelZero. This episode has one central question. It follows Martin Luther King Jr. You will understand why his work matters.\n\nThe story begins here.",
+    ) ?? "",
+    /exactly one or two complete sentences/,
+  );
+  assert.equal(
+    podcastStyleFailureMessage(
+      removeAiProductionDisclosures(
+        "Welcome to KernelZero. In this episode, U.S. agencies and OpenAI are tracing how frontier agents cross network boundaries, so you'll understand why those paths matter for infrastructure security.\n\nThe report starts with the systems they examined.",
+      ),
+    ),
+    null,
+  );
 });
 
 test("Ollama uses the supplied KernelZero section-writing contract", () => {
@@ -918,6 +1149,18 @@ test("Ollama uses the supplied KernelZero section-writing contract", () => {
   );
   assert.match(
     KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /This must be the first spoken sentence\.[\s\S]*identify today's concrete topic or story[\s\S]*what they will understand and why it matters/,
+  );
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /Name the load-bearing organization, product, model, benchmark, paper, or incident/,
+  );
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+    /Keep the greeting and these orientation sentences together as the first paragraph\. Then insert a blank line/,
+  );
+  assert.match(
+    KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
     /"That's today's episode of KernelZero\."[\s\S]*"Until next time, stay curious\."/,
   );
   assert.match(
@@ -928,6 +1171,50 @@ test("Ollama uses the supplied KernelZero section-writing contract", () => {
     KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
     /Return ONLY the requested JSON\.$/,
   );
+});
+
+test("Ollama routes opening feedback only to the opening section", () => {
+  const styleFailure = podcastStyleFailureMessage(
+    "A benchmark tested frontier agents.\n\nTo understand the result, we need to look at the environment.",
+  );
+  assert.ok(styleFailure);
+  const feedback = [
+    `Repetition verification failed: remove one repeated idea.\n${styleFailure}`,
+  ];
+  const openingFeedback = podcastSectionRevisionFeedback(feedback, 1).join("\n");
+  const bodyFeedback = podcastSectionRevisionFeedback(feedback, 2).join("\n");
+
+  assert.match(openingFeedback, /Welcome to KernelZero/);
+  assert.match(openingFeedback, /listener payoff/);
+  assert.match(openingFeedback, /replace the canned transition/);
+  assert.match(bodyFeedback, /Repetition verification failed/);
+  assert.match(bodyFeedback, /replace the canned transition/);
+  assert.match(bodyFeedback, /remove any "Welcome to KernelZero\." greeting/);
+  assert.doesNotMatch(bodyFeedback, /start the spoken script|exactly once/);
+  assert.doesNotMatch(bodyFeedback, /listener payoff/);
+
+  const stockOnlyFailure = podcastStyleFailureMessage(
+    "Welcome to KernelZero. This episode explains how agent boundaries work and why infrastructure teams should care.\n\nTo understand the result, we need to look at the environment.",
+  );
+  assert.ok(stockOnlyFailure);
+  assert.deepEqual(
+    podcastSectionRevisionFeedback([stockOnlyFailure], 2),
+    [stockOnlyFailure],
+  );
+
+  const duplicateGreetingFailure = podcastStyleFailureMessage(
+    "Welcome to KernelZero. This episode explains how agent boundaries work and why infrastructure teams should care.\n\nThe body begins here. Welcome to KernelZero.",
+  );
+  assert.ok(duplicateGreetingFailure);
+  const duplicateGreetingBodyFeedback = podcastSectionRevisionFeedback(
+    [duplicateGreetingFailure],
+    2,
+  ).join("\n");
+  assert.match(
+    duplicateGreetingBodyFeedback,
+    /remove any "Welcome to KernelZero\." greeting from this section/,
+  );
+  assert.doesNotMatch(duplicateGreetingBodyFeedback, /exactly once/);
 });
 
 test("spoken transcript guard removes only AI-production disclosures", () => {
@@ -1912,6 +2199,39 @@ test("Ollama trimming never turns an arbitrary word slice into a sentence", () =
   assert.equal(hasDanglingNarrationEnding("This is what the evidence leads to."), false);
 });
 
+test("Ollama trimming preserves the podcast opening paragraph", () => {
+  const opening =
+    "Welcome to KernelZero. This episode traces an agent sandbox escape, so you'll understand why outbound network boundaries matter.";
+  const firstBodySentence =
+    "The first supported mechanism begins with an unrestricted network request.";
+  const expected = `${opening}\n\n${firstBodySentence}`;
+  const overlong =
+    `${expected} A second complete sentence adds enough detail to exceed the selected word ceiling.`;
+
+  assert.equal(
+    trimNarrationToCompleteSentences(overlong, countScriptWords(expected)),
+    expected,
+  );
+});
+
+test("Ollama rejects a trim that leaves only the orientation paragraph", () => {
+  const opening =
+    "Welcome to KernelZero. In this episode, we'll trace how an agent crosses a network boundary, so you'll understand why one missing control can expose real infrastructure during controlled security testing.";
+  const hook =
+    "The first clue appears when a blocked request quietly succeeds.";
+  const trimmed = trimNarrationToCompleteSentences(
+    `${opening}\n\n${hook}`,
+    35,
+  );
+
+  assert.equal(countScriptWords(opening), 30);
+  assert.equal(trimmed, opening);
+  assert.match(
+    podcastStyleFailureMessage(trimmed) ?? "",
+    /insert a blank line before the hook and technical story/,
+  );
+});
+
 test("Ollama connection failures identify the local service", async () => {
   const originalFetch = globalThis.fetch;
   const originalBaseUrl = process.env.OLLAMA_BASE_URL;
@@ -2132,6 +2452,121 @@ test("Ollama planner scales fact-card depth with sources and episode length", ()
   assert.equal(podcastPlanFactCardLimit(3, "deep"), 24);
 });
 
+function mockOllamaSectionNarration(
+  sectionNumber: number,
+  wordCount: number,
+  wordAt: (index: number) => string,
+): string {
+  if (sectionNumber !== 1) {
+    return `${Array.from({ length: wordCount }, (_, index) => wordAt(index)).join(" ")}.`;
+  }
+
+  const opening =
+    "Welcome to KernelZero. This episode traces a grounded systems story, so you'll understand why its engineering choices matter.";
+  const bodyWords = wordCount - countScriptWords(opening);
+  assert.ok(bodyWords > 0, "the mocked opening section needs a body paragraph");
+  return `${opening}\n\n${Array.from({ length: bodyWords }, (_, index) => wordAt(index)).join(" ")}.`;
+}
+
+test("Ollama regeneration reuses all seven drafts after the opening paragraph break", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  process.env.OLLAMA_PARALLELISM = "3";
+  const sectionWords = [28, 53, 73, 77, 49, 77, 48];
+  const previousSections = [
+    "Welcome to KernelZero. This episode traces how the current draft handles agent boundaries, so you'll understand why its structure matters.\n\ncurrent-draft-section-1-sentinel.",
+    ...Array.from(
+      { length: 6 },
+      (_, index) => `current-draft-section-${index + 2}-sentinel.`,
+    ),
+  ];
+  const currentDraft = previousSections.join("\n\n");
+  const writerPrompts = Array.from({ length: 7 }, () => "");
+
+  assert.deepEqual(
+    podcastDraftSectionsForRevision(currentDraft),
+    previousSections,
+  );
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      return ndjson({
+        title: "Regenerated briefing",
+        dek: "Every prior section remains available for revision.",
+        facts: [],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Section ${index + 1} focus.`,
+        })),
+      });
+    }
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
+      const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      writerPrompts[sectionNumber - 1] = user;
+      return ndjson({
+        script: mockOllamaSectionNarration(
+          sectionNumber,
+          sectionWords[sectionNumber - 1],
+          (index) => `regenerated${sectionNumber}word${index}`,
+        ),
+        claims: [],
+      });
+    }
+    if (
+      system.includes("source-fabrication checker") ||
+      system.includes("podcast narrative editor")
+    ) {
+      return ndjson({ issues: [] });
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    const generated = await createOllamaPodcast(
+      [item()],
+      "daily_digest",
+      "brief",
+      [],
+      {
+        episodeId: "episode-regeneration",
+        topic: "Regenerated briefing",
+        currentDraft,
+      },
+    );
+
+    assert.equal(countScriptWords(generated.script), 405);
+    for (const [index, prompt] of writerPrompts.entries()) {
+      assert.match(prompt, /TARGETED REVISION ATTEMPT 1/);
+      assert.ok(
+        prompt.includes(`current-draft-section-${index + 1}-sentinel`),
+        `section ${index + 1} must receive its matching current draft`,
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
 test("Ollama pipeline fans out writers and fans in parallel critics", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
@@ -2141,6 +2576,8 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
   let peak = 0;
   let requestCount = 0;
   let criticCount = 0;
+  let openingWriterPrompt = "";
+  let narrativeCriticPrompt = "";
 
   const ndjson = (content: unknown) =>
     new Response(
@@ -2186,11 +2623,13 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
       const sectionNumber = Number(
         user.match(/Section (\d+) focus:/)?.[1],
       );
+      if (sectionNumber === 1) openingWriterPrompt = user;
       return ndjson({
-        script: Array.from(
-          { length: sectionWords[sectionNumber - 1] },
+        script: mockOllamaSectionNarration(
+          sectionNumber,
+          sectionWords[sectionNumber - 1],
           () => `section${sectionNumber}word`,
-        ).join(" "),
+        ),
         claims: [],
       });
     }
@@ -2199,6 +2638,9 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
       system.includes("podcast narrative editor")
     ) {
       criticCount += 1;
+      if (system.includes("podcast narrative editor")) {
+        narrativeCriticPrompt = system;
+      }
       return ndjson({ issues: [] });
     }
     throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
@@ -2212,10 +2654,18 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
     );
     assert.equal(generated.title, "Parallel KernelZero");
     assert.equal(countScriptWords(generated.script), 405);
-    assert.equal(generated.script.split(/\n\s*\n/).length, 7);
+    assert.equal(generated.script.split(/\n\s*\n/).length, 8);
     assert.equal(peak, 3);
     assert.equal(criticCount, 2);
     assert.equal(requestCount, 10);
+    assert.match(
+      openingWriterPrompt,
+      /required KernelZero greeting[^]*load-bearing organizations, products, models, benchmarks, papers, or incidents/,
+    );
+    assert.match(
+      narrativeCriticPrompt,
+      /either does not begin with 'Welcome to KernelZero\.' OR does not orient the listener/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
@@ -2229,6 +2679,8 @@ test("Ollama gives an under-length first-pass section one deficit-aware rewrite"
   process.env.OLLAMA_PARALLELISM = "3";
   const sectionWords = [28, 53, 73, 77, 49, 77, 48];
   const writerCalls = Array.from({ length: 7 }, () => 0);
+  const sectionOnePrompts: string[] = [];
+  const sectionTwoPrompts: string[] = [];
   const sectionThreePrompts: string[] = [];
 
   const ndjson = (content: unknown) =>
@@ -2269,15 +2721,25 @@ test("Ollama gives an under-length first-pass section one deficit-aware rewrite"
     ) {
       const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
       writerCalls[sectionNumber - 1] += 1;
+      if (sectionNumber === 1) sectionOnePrompts.push(user);
+      if (sectionNumber === 2) sectionTwoPrompts.push(user);
       if (sectionNumber === 3) sectionThreePrompts.push(user);
+      if (sectionNumber === 1 && writerCalls[0] === 1) {
+        return ndjson({
+          script:
+            "Welcome to KernelZero. This episode explains how agent boundaries work and why infrastructure teams should care.\n\nTo understand the result, we need to look at the environment.",
+          claims: [],
+        });
+      }
       const wordCount = sectionNumber === 3 && writerCalls[2] === 1
         ? 12
         : sectionWords[sectionNumber - 1];
       return ndjson({
-        script: Array.from(
-          { length: wordCount },
-          (_, index) => `section${sectionNumber}word${index}`,
-        ).join(" ") + ".",
+        script: mockOllamaSectionNarration(
+          sectionNumber,
+          wordCount,
+          (index) => `section${sectionNumber}word${index}`,
+        ),
         claims: [],
       });
     }
@@ -2295,9 +2757,26 @@ test("Ollama gives an under-length first-pass section one deficit-aware rewrite"
       [item()],
       "daily_digest",
       "brief",
+      [
+        'Podcast style validation failed: start the spoken script with the exact sentence "Welcome to KernelZero."; use exactly one or two complete sentences to name the topic and include a concrete listener payoff.',
+      ],
     );
     assert.equal(countScriptWords(generated.script), 405);
-    assert.deepEqual(writerCalls, [1, 1, 2, 1, 1, 1, 1]);
+    assert.deepEqual(writerCalls, [2, 1, 2, 1, 1, 1, 1]);
+    assert.equal(sectionOnePrompts.length, 2);
+    assert.match(sectionOnePrompts[0], /REVISION FEEDBACK[^]*listener payoff/);
+    assert.match(sectionOnePrompts[1], /OPENING REPAIR ATTEMPT 2/);
+    assert.match(
+      sectionOnePrompts[1],
+      /Podcast style validation failed:[^]*replace the canned transition/,
+    );
+    assert.doesNotMatch(
+      sectionOnePrompts[1],
+      /TARGETED REVISION ATTEMPT 2/,
+    );
+    assert.equal(sectionTwoPrompts.length, 1);
+    assert.doesNotMatch(sectionTwoPrompts[0], /Welcome to KernelZero/);
+    assert.doesNotMatch(sectionTwoPrompts[0], /listener payoff/);
     assert.equal(sectionThreePrompts.length, 2);
     assert.notEqual(sectionThreePrompts[0], sectionThreePrompts[1]);
     assert.doesNotMatch(sectionThreePrompts[0], /LENGTH REPAIR ATTEMPT/);
@@ -2363,10 +2842,11 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
       const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
       const initialWords = sectionNumber === 4 ? 39 : 60;
       return ndjson({
-        script: Array.from(
-          { length: initialWords },
-          (_, index) => `initial${sectionNumber}word${index}`,
-        ).join(" ") + ".",
+        script: mockOllamaSectionNarration(
+          sectionNumber,
+          initialWords,
+          (index) => `initial${sectionNumber}word${index}`,
+        ),
         claims: [],
       });
     }
@@ -2521,13 +3001,19 @@ test("Ollama critics repair a new evidence issue that appears on a late audit", 
           : "";
       const reservedWords = countScriptWords(includedDetail);
       return ndjson({
-        script: [
-          ...(includedDetail ? [includedDetail] : []),
-          ...Array.from(
-            { length: sectionWords[sectionNumber - 1] - reservedWords },
-            () => `section${sectionNumber}revision${revision}`,
-          ),
-        ].join(" "),
+        script: sectionNumber === 1
+          ? mockOllamaSectionNarration(
+              sectionNumber,
+              sectionWords[sectionNumber - 1],
+              () => `section${sectionNumber}revision${revision}`,
+            )
+          : [
+              ...(includedDetail ? [includedDetail] : []),
+              ...Array.from(
+                { length: sectionWords[sectionNumber - 1] - reservedWords },
+                () => `section${sectionNumber}revision${revision}`,
+              ),
+            ].join(" "),
         claims: [],
       });
     }
@@ -2649,13 +3135,19 @@ test("Ollama stops after two repairs of the same evidence issue", async () => {
         ? countScriptWords(unsupportedDetail)
         : 0;
       return ndjson({
-        script: [
-          ...(sectionNumber === 3 ? [unsupportedDetail] : []),
-          ...Array.from(
-            { length: sectionWords[sectionNumber - 1] - reservedWords },
-            () => `section${sectionNumber}word`,
-          ),
-        ].join(" "),
+        script: sectionNumber === 1
+          ? mockOllamaSectionNarration(
+              sectionNumber,
+              sectionWords[sectionNumber - 1],
+              () => `section${sectionNumber}word`,
+            )
+          : [
+              ...(sectionNumber === 3 ? [unsupportedDetail] : []),
+              ...Array.from(
+                { length: sectionWords[sectionNumber - 1] - reservedWords },
+                () => `section${sectionNumber}word`,
+              ),
+            ].join(" "),
         claims: [],
       });
     }
@@ -2899,7 +3391,13 @@ test("generation rewrites an intro-sized response before creating an episode", a
   });
   const responses = [
     packageFor("This response contains only a short introduction."),
-    packageFor(Array.from({ length: 1_350 }, () => "word").join(" ")),
+    packageFor(
+      (() => {
+        const opening =
+          "Welcome to KernelZero. This episode explores quantization as a practical inference trade-off, so you'll understand why model speed and resource use have to be evaluated together.";
+        return `${opening}\n\n${Array.from({ length: 1_350 - countScriptWords(opening) }, () => "word").join(" ")}`;
+      })(),
+    ),
   ];
 
   process.env.AI_PROVIDER = "openai";
@@ -2961,7 +3459,7 @@ test("generation rewrites an intro-sized response before creating an episode", a
   }
 });
 
-test("generation repairs a stock transition before persisting the podcast", async () => {
+test("generation repairs a direct-fire opening before persisting the podcast", async () => {
   const originalFetch = globalThis.fetch;
   const originalProvider = process.env.AI_PROVIDER;
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
@@ -2970,9 +3468,9 @@ test("generation repairs a stock transition before persisting the podcast", asyn
   const stockOpening =
     "To understand the current landscape, we need to look at how infrastructure is evolving.";
   const concreteOpening =
-    "Outbound network controls are changing how agents can reach external infrastructure.";
+    "Welcome to KernelZero. This episode traces how outbound network controls shape what AI agents can reach, so you'll understand why the boundary matters before we get into the implementation.";
   const scriptWith = (opening: string) =>
-    `${opening} ${Array.from({ length: 405 - countScriptWords(opening) }, (_, index) => `detail${index}`).join(" ")}`;
+    `${opening}\n\n${Array.from({ length: 405 - countScriptWords(opening) }, (_, index) => `detail${index}`).join(" ")}`;
   const packageFor = (script: string) => ({
     title: "Style checked",
     dek: "A concrete briefing.",
@@ -3016,7 +3514,7 @@ test("generation repairs a stock transition before persisting the podcast", asyn
     };
     assert.match(
       repairBody.input[1].content[0].text,
-      /Podcast style validation failed/,
+      /Podcast style validation failed:[^]*Welcome to KernelZero[^]*preview what the listener will understand/,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -3042,10 +3540,12 @@ test("OpenAI regeneration prompt uses the supplied topic and current draft", asy
     "OpenAI’s Cyberattack Against Hugging Face: Science Fiction That Became Reality";
   const currentDraft =
     "This exact current-draft sentinel must reach the revision prompt.";
-  const script = Array.from(
-    { length: 405 },
+  const regenerationOpening =
+    "Welcome to KernelZero. This episode follows the reported Hugging Face security story, so you'll understand what happened and why agent isolation matters.";
+  const script = `${regenerationOpening}\n\n${Array.from(
+    { length: 405 - countScriptWords(regenerationOpening) },
     (_, index) => `regenerated${index}`,
-  ).join(" ");
+  ).join(" ")}`;
 
   process.env.AI_PROVIDER = "openai";
   process.env.OPENAI_API_KEY = "test-key";
@@ -3112,10 +3612,12 @@ test("OpenAI speech receives the podcast performance direction", async () => {
   const originalTtsVoice = process.env.OPENAI_TTS_VOICE;
   const speechRequests: Array<Record<string, unknown>> = [];
   let checkpointedDraft = false;
-  const cleanScript = Array.from(
-    { length: 405 },
+  const speechOpening =
+    "Welcome to KernelZero. This episode explains how evidence becomes a spoken engineering story, so you'll understand what the narration preserves and why delivery matters.";
+  const cleanScript = `${speechOpening}\n\n${Array.from(
+    { length: 405 - countScriptWords(speechOpening) },
     (_, index) => `spoken${index}`,
-  ).join(" ");
+  ).join(" ")}`;
   const script =
     `This episode was written and produced by AI. ${cleanScript}`;
 
@@ -3243,11 +3745,13 @@ test("evidence verification allows generic context and retries a failed repair",
   const originalProvider = process.env.AI_PROVIDER;
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   const requests: RequestInit[] = [];
+  const evidenceOpening =
+    "Welcome to KernelZero. This episode examines the trade-offs around model inference, so you'll understand how capability, compute, cost, and latency fit together.";
   const draft = (title: string) => ({
     title,
     dek: "A grounded briefing.",
     script:
-      `LLMs are broadly capable, while large models require substantial compute and inference has cost and latency trade-offs. ${Array.from({ length: 1_240 }, () => "context").join(" ")}`,
+      `${evidenceOpening}\n\nLLMs are broadly capable, while large models require substantial compute and inference has cost and latency trade-offs. ${Array.from({ length: 1_240 }, () => "context").join(" ")}`,
     showNotes: "Source: https://example.com/paper",
     chapters: [{ title: "Background", startSeconds: 0 }],
     claims: [

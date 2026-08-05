@@ -114,6 +114,26 @@ function normalizedSentence(sentence: string): string {
     .trim();
 }
 
+function filterNarrationSentences(
+  script: string,
+  keep: (sentence: string) => boolean,
+): { script: string; removed: boolean } {
+  let removed = false;
+  const paragraphs = script
+    .trim()
+    .split(/\n\s*\n/)
+    .map((paragraph) => {
+      const kept = splitNarrationSentences(paragraph).filter((sentence) => {
+        const shouldKeep = keep(sentence);
+        if (!shouldKeep) removed = true;
+        return shouldKeep;
+      });
+      return kept.join(" ").trim();
+    })
+    .filter(Boolean);
+  return { script: paragraphs.join("\n\n").trim(), removed };
+}
+
 /**
  * Removes exact or high-confidence near-verbatim sentences already present in
  * another section. Returns null when no safe deterministic match exists.
@@ -122,22 +142,22 @@ export function removeRepeatedSentencesAgainstReference(
   targetScript: string,
   referenceScript: string,
 ): string | null {
-  const targetSentences = splitNarrationSentences(targetScript);
   const referenceSentences = splitNarrationSentences(referenceScript);
-  if (!targetSentences.length || !referenceSentences.length) return null;
+  if (!splitNarrationSentences(targetScript).length || !referenceSentences.length) {
+    return null;
+  }
 
   const referenceNormalized = new Set(
     referenceSentences.map(normalizedSentence),
   );
-  const kept = targetSentences.filter((sentence) => {
+  const filtered = filterNarrationSentences(targetScript, (sentence) => {
     if (referenceNormalized.has(normalizedSentence(sentence))) return false;
     return !referenceSentences.some((reference) => {
       const { score, shared } = semanticContainment(sentence, reference);
       return shared >= 4 && score >= 0.78;
     });
   });
-  if (kept.length === targetSentences.length) return null;
-  return kept.join(" ").trim();
+  return filtered.removed ? filtered.script : null;
 }
 
 /**

@@ -26,6 +26,7 @@ import {
 } from "./kernelzero-transcript-prompt";
 import { splitNarrationSentences } from "./sentence-segmentation";
 import { removeRepeatedSentencesAgainstReference } from "./script-repetition";
+import { podcastStyleFailureMessage } from "./podcast-style";
 import type { ContentItem, Episode, EpisodeLength } from "./types";
 import {
   LINKEDIN_POST_SYSTEM_PROMPT,
@@ -357,7 +358,7 @@ const sectionPlans = [
   {
     title: "Why this matters",
     promptTitle: "Why This Matters",
-    direction: "Open with a concrete human hook. Identify the central themes at a high level and explain why listeners should care. This is an overview only: do not include benchmark names, model names, detailed events, methods, findings, examples, or numbers that belong in later sections.",
+    direction: "Begin with the required KernelZero greeting. Use the next one or two sentences to identify this episode's concrete topic, preview what listeners will understand, and explain why they should care before moving into an episode-specific hook. Name the load-bearing organizations, products, models, benchmarks, papers, or incidents needed to make that orientation specific. This is an overview only: reserve detailed events, methods, findings, examples, and numbers for the later sections that own them.",
   },
   {
     title: "Background",
@@ -390,6 +391,63 @@ const sectionPlans = [
     direction: "Synthesize what to watch next and close with a complete, concise conclusion. Do not introduce new facts or recap detailed facts, examples, methods, or findings in the ending.",
   },
 ] as const;
+
+const PODCAST_STYLE_FAILURE_PREFIX = "Podcast style validation failed:";
+const PODCAST_WIDE_REVISION_CLAUSE = /^replace the canned transition\b/i;
+const DUPLICATE_GREETING_REVISION_CLAUSE =
+  /^use "Welcome to KernelZero\." exactly once\b/i;
+const BODY_GREETING_REVISION_CLAUSE =
+  'remove any "Welcome to KernelZero." greeting from this section because it belongs only at the start of section 1';
+
+export function podcastSectionRevisionFeedback(
+  revisionFeedback: string[],
+  sectionNumber: number,
+): string[] {
+  return revisionFeedback.flatMap((feedback) =>
+    feedback
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .flatMap((line) => {
+        if (!line.startsWith(PODCAST_STYLE_FAILURE_PREFIX)) return [line];
+        const clauses = line
+          .slice(PODCAST_STYLE_FAILURE_PREFIX.length)
+          .replace(/\.$/, "")
+          .split(/;\s+/)
+          .map((clause) => clause.trim());
+        const scopedClauses = clauses.flatMap((clause) => {
+          if (sectionNumber === 1 || PODCAST_WIDE_REVISION_CLAUSE.test(clause)) {
+            return [clause];
+          }
+          return DUPLICATE_GREETING_REVISION_CLAUSE.test(clause)
+            ? [BODY_GREETING_REVISION_CLAUSE]
+            : [];
+        });
+        return scopedClauses.length
+          ? [`${PODCAST_STYLE_FAILURE_PREFIX} ${scopedClauses.join("; ")}.`]
+          : [];
+      })
+  );
+}
+
+export function podcastDraftSectionsForRevision(currentDraft: string): string[] {
+  const paragraphs = currentDraft
+    .split(/\n\s*\n/)
+    .map((script) => script.trim())
+    .filter(Boolean);
+  const extraOpeningParagraphs = paragraphs.length - sectionPlans.length;
+  if (
+    extraOpeningParagraphs >= 1 &&
+    paragraphs[0]?.startsWith("Welcome to KernelZero.")
+  ) {
+    const openingSectionParagraphs = extraOpeningParagraphs + 1;
+    return [
+      paragraphs.slice(0, openingSectionParagraphs).join("\n\n"),
+      ...paragraphs.slice(openingSectionParagraphs),
+    ];
+  }
+  return paragraphs;
+}
 
 function podcastPlanSchema() {
   return {
@@ -677,15 +735,30 @@ export function trimNarrationToCompleteSentences(
   const trimmed = script.trim();
   if (countScriptWords(trimmed) <= maxWords) return trimmed;
 
-  const kept: string[] = [];
-  for (const sentence of splitNarrationSentences(trimmed)) {
-    const candidate = sentence.trim();
-    if (!COMPLETE_NARRATION_ENDING.test(candidate)) break;
-    const next = [...kept, candidate].join(" ");
-    if (countScriptWords(next) > maxWords) break;
-    kept.push(candidate);
+  const keptParagraphs: string[] = [];
+  for (const paragraph of trimmed.split(/\n\s*\n/)) {
+    const keptSentences: string[] = [];
+    for (const sentence of splitNarrationSentences(paragraph)) {
+      const candidate = sentence.trim();
+      const keptSoFar = () =>
+        [...keptParagraphs, keptSentences.join(" ")]
+          .filter(Boolean)
+          .join("\n\n")
+          .trim();
+      if (!COMPLETE_NARRATION_ENDING.test(candidate)) {
+        return keptSoFar() || trimmed;
+      }
+      const next = [...keptParagraphs, [...keptSentences, candidate].join(" ")]
+        .filter(Boolean)
+        .join("\n\n");
+      if (countScriptWords(next) > maxWords) {
+        return keptSoFar() || trimmed;
+      }
+      keptSentences.push(candidate);
+    }
+    if (keptSentences.length) keptParagraphs.push(keptSentences.join(" "));
   }
-  return kept.length ? kept.join(" ").trim() : trimmed;
+  return keptParagraphs.length ? keptParagraphs.join("\n\n").trim() : trimmed;
 }
 
 async function createPodcastSection(
@@ -701,7 +774,12 @@ async function createPodcastSection(
 ): Promise<PodcastSection> {
   let previous: PodcastSection | null = draftToExpand;
   let best: PodcastSection | null = draftToExpand;
-  let previousStructuralFailure: "dangling" | "overlong" | null = null;
+  let previousStructuralFailure:
+    | "dangling"
+    | "opening"
+    | "overlong"
+    | null = null;
+  let previousOpeningStyleFailure: string | null = null;
   const minimumSentences = Math.max(5, Math.ceil(minWords / 18));
   const isFirstPass = draftToExpand === null && !repetitionFeedback.length;
   // Each first-pass short section gets one changed-prompt, deficit-aware repair.
@@ -720,12 +798,14 @@ async function createPodcastSection(
     const previousWords = countScriptWords(previous?.script ?? "");
     const previousDeficit = Math.max(0, minWords - previousWords);
     const previousDraftInstruction = previous
-      ? repetitionFeedback.length
-        ? `TARGETED REVISION ATTEMPT ${attempt + 1}: Apply every revision item to this existing section while preserving its useful, supported material. Keep the revised script within ${minWords}–${maxWords} words and do not introduce facts owned by another section:\n${JSON.stringify(previous)}`
+      ? previousStructuralFailure === "opening"
+          ? `OPENING REPAIR ATTEMPT ${attempt + 1}: Rewrite the complete section within ${minWords}–${maxWords} words and fix every exact validator issue below. Keep "Welcome to KernelZero." and the episode-specific listener orientation in the first paragraph, then add a blank line and at least one complete hook/body sentence in a second paragraph.\n${previousOpeningStyleFailure ?? "Podcast style validation failed: repair the opening structure."}\nPREVIOUS DRAFT:\n${JSON.stringify(previous)}`
         : previousStructuralFailure === "dangling"
           ? `STRUCTURE REPAIR ATTEMPT ${attempt + 1}: The previous draft ended with an unfinished transition. Rewrite its ending as a complete thought, without adding unsupported facts, and keep the whole script within ${minWords}–${maxWords} words:\n${JSON.stringify(previous)}`
           : previousStructuralFailure === "overlong"
             ? `STRUCTURE REPAIR ATTEMPT ${attempt + 1}: The previous draft exceeded the ${maxWords}-word ceiling without a usable complete-sentence boundary. Rewrite it as complete sentences within ${minWords}–${maxWords} words:\n${JSON.stringify(previous)}`
+          : repetitionFeedback.length
+            ? `TARGETED REVISION ATTEMPT ${attempt + 1}: Apply every revision item to this existing section while preserving its useful, supported material. Keep the revised script within ${minWords}–${maxWords} words and do not introduce facts owned by another section:\n${JSON.stringify(previous)}`
         : `LENGTH REPAIR ATTEMPT ${attempt + 1}: The previous draft had ${previousWords} words, a deficit of ${previousDeficit} words against the ${minWords}-word minimum. Return the complete revised section, preserving its useful supported material while adding at least ${previousDeficit} net new words of distinct explanation specific to this section. Reach ${minWords}–${maxWords} words and at least ${minimumSentences} sentences. Do not shorten it, repeat it verbatim, or add unsupported facts:\n${JSON.stringify(previous)}`
       : "";
     const userPrompt = `CURRENT_SECTION = "${plan.promptTitle}"
@@ -811,19 +891,33 @@ Return exactly one JSON object shaped as {"script":"complete narration here"}.`,
     );
     const words = countScriptWords(candidate.script);
     const hasDanglingEnding = hasDanglingNarrationEnding(candidate.script);
-    if (words >= minWords && words <= maxWords && !hasDanglingEnding) {
+    const openingStyleFailure = sectionNumber === 1
+      ? podcastStyleFailureMessage(candidate.script)
+      : null;
+    if (
+      words >= minWords &&
+      words <= maxWords &&
+      !hasDanglingEnding &&
+      !openingStyleFailure
+    ) {
       return candidate;
     }
     const needsFirstPassLengthRepair = isFirstPass && words < minWords;
     if (attempt === 0 && maxAttempts === 1 && (
-      hasDanglingEnding || rawWordCount > maxWords || needsFirstPassLengthRepair
+      hasDanglingEnding ||
+      rawWordCount > maxWords ||
+      needsFirstPassLengthRepair ||
+      openingStyleFailure
     )) {
       maxAttempts = 2;
-      previousStructuralFailure = hasDanglingEnding
-        ? "dangling"
-        : rawWordCount > maxWords
-          ? "overlong"
-          : null;
+      previousStructuralFailure = openingStyleFailure
+        ? "opening"
+        : hasDanglingEnding
+          ? "dangling"
+          : rawWordCount > maxWords
+            ? "overlong"
+            : null;
+      previousOpeningStyleFailure = openingStyleFailure;
       logOllamaDecision(
         "section_retry",
         `section=${sectionNumber} total_words=${words} deficit_words=${Math.max(0, minWords - words)} reason=${previousStructuralFailure ?? "under_length"}`,
@@ -840,12 +934,16 @@ Return exactly one JSON object shaped as {"script":"complete narration here"}.`,
   }
   const minimumUsableDraftWords = Math.min(12, minWords);
   const bestScript = best?.script.trim() ?? "";
+  const bestOpeningStyleFailure = sectionNumber === 1
+    ? podcastStyleFailureMessage(bestScript)
+    : null;
   if (
     best &&
     countScriptWords(bestScript) >= minimumUsableDraftWords &&
     countScriptWords(bestScript) <= maxWords &&
     COMPLETE_NARRATION_ENDING.test(bestScript) &&
-    !hasDanglingNarrationEnding(bestScript)
+    !hasDanglingNarrationEnding(bestScript) &&
+    !bestOpeningStyleFailure
   ) {
     // The bounded first-pass repair has already run for an initially short
     // section. Keep any remaining coherent source-grounded material so the
@@ -1691,7 +1789,7 @@ async function auditPodcastNarrative(
       {
         role: "system",
         content:
-          "You are a conservative podcast narrative editor. Flag only material problems: a concrete fact or explanation retold across sections, a section violating its stated purpose, an unfinished transition, a broken conclusion, conspicuously robotic essay cadence, a canned AI transition (including the stock bridge 'To understand X, we need/have to look at Y' or a close variant), an internal section title spoken aloud, emotion that clashes with the subject, or prose with no natural breathing room across a genuine topic change. Do not flag normal topic continuity, brief callbacks, implications that build on earlier facts, or restrained stylistic differences. Return an empty issues array when the script is coherent and conversational. Return compact JSON only.",
+          "You are a conservative podcast narrative editor. Flag only material problems: an opening section that either does not begin with 'Welcome to KernelZero.' OR does not orient the listener to this episode's specific topic and payoff before technical details, a concrete fact or explanation retold across sections, a section violating its stated purpose, an unfinished transition, a broken conclusion, conspicuously robotic essay cadence, a canned AI transition (including the stock bridge 'To understand X, we need/have to look at Y' or a close variant), an internal section title spoken aloud, emotion that clashes with the subject, or prose with no natural breathing room across a genuine topic change. Do not flag normal topic continuity, brief callbacks, implications that build on earlier facts, or restrained stylistic differences. Return an empty issues array when the script is coherent and conversational. Return compact JSON only.",
       },
       {
         role: "user",
@@ -1901,10 +1999,7 @@ export async function createStructuredPodcast(
     regeneration,
   );
   const previousSections = regeneration
-    ? regeneration.currentDraft
-        .split(/\n\s*\n/)
-        .map((script) => script.trim())
-        .filter(Boolean)
+    ? podcastDraftSectionsForRevision(regeneration.currentDraft)
     : [];
   const canRevisePreviousSections =
     previousSections.length === sectionPlans.length;
@@ -1919,13 +2014,17 @@ export async function createStructuredPodcast(
     ollamaParallelism(),
     async (sectionPlan, index) => {
       const wordRange = wordRanges[index];
+      const sectionRevisionFeedback = podcastSectionRevisionFeedback(
+        combinedRevisionFeedback,
+        index + 1,
+      );
       return createPodcastSection(
         items,
         sectionPlan,
         wordRange.minWords,
         wordRange.maxWords,
         [],
-        combinedRevisionFeedback,
+        sectionRevisionFeedback,
         canRevisePreviousSections
           ? { script: previousSections[index], claims: [] }
           : null,
