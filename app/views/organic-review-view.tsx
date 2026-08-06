@@ -7,6 +7,16 @@ import {
   linkedInPostEditorDraft,
   resolveLinkedInPostEditorValue,
 } from "../../lib/linkedin-post-editor";
+import {
+  appendLinkedInPostSource,
+  containsLinkedInPostSourceReference,
+  LINKEDIN_POST_MAX_CHARACTERS,
+  linkedInPostCharacterCount,
+  primaryLinkedInPostSource,
+  replaceLinkedInPostContent,
+  resolveLinkedInSourceCta,
+  splitLinkedInPostSource,
+} from "../../lib/linkedin-post-format";
 
 function titleCase(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (l) => l.toUpperCase());
@@ -72,11 +82,29 @@ export function OrganicReviewView({
   const [linkedInDraft, setLinkedInDraft] = useState(() =>
     linkedInPostEditorDraft(episode.id, persistedLinkedInPost),
   );
-  const linkedInPost = resolveLinkedInPostEditorValue(
+  const storedLinkedInPost = resolveLinkedInPostEditorValue(
     linkedInDraft,
     episode.id,
     persistedLinkedInPost,
   );
+  const storedLinkedInParts = storedLinkedInPost
+    ? splitLinkedInPostSource(storedLinkedInPost)
+    : { content: "", sourceCta: null, sourceFooter: null };
+  const linkedInSource = primaryLinkedInPostSource(episode, state.items);
+  const linkedInSourceCta = resolveLinkedInSourceCta(
+    storedLinkedInPost,
+    episode.title,
+  );
+  const linkedInPost =
+    storedLinkedInPost?.trim() &&
+    storedLinkedInParts.content.trim() &&
+    linkedInSource
+      ? appendLinkedInPostSource(
+          storedLinkedInParts.content,
+          linkedInSource,
+          linkedInSourceCta,
+        )
+      : storedLinkedInPost;
   const updateLinkedInPost = (value: string | null) => {
     setLinkedInDraft(
       linkedInPostEditorDraft(episode.id, persistedLinkedInPost, value),
@@ -120,6 +148,19 @@ export function OrganicReviewView({
   const linkedInSaving = busy === `linkedin-save:${episode.id}`;
   const linkedInDirty =
     linkedInPost !== null && linkedInPost !== persistedLinkedInPost;
+  const linkedInCharacterCount = linkedInPost
+    ? linkedInPostCharacterCount(linkedInPost)
+    : 0;
+  const linkedInParts = linkedInPost
+    ? splitLinkedInPostSource(linkedInPost)
+    : { content: "", sourceCta: null, sourceFooter: null };
+  const linkedInHasContent = Boolean(linkedInParts.content.trim());
+  const linkedInHasSource = linkedInParts.sourceFooter !== null;
+  const linkedInHasExtraSource = containsLinkedInPostSourceReference(
+    linkedInParts.content,
+  );
+  const linkedInTooLong =
+    linkedInCharacterCount > LINKEDIN_POST_MAX_CHARACTERS;
   const generateLinkedInPost = async () => {
     const post = await onGenerateLinkedInPost();
     if (post !== null) {
@@ -128,7 +169,7 @@ export function OrganicReviewView({
     }
   };
   const saveLinkedInPost = async () => {
-    if (!linkedInPost?.trim()) return;
+    if (!linkedInPost?.trim() || !linkedInHasContent) return;
     const savedPost = await onSaveLinkedInPost(linkedInPost);
     if (savedPost !== null) {
       updateLinkedInPost(savedPost);
@@ -301,24 +342,41 @@ export function OrganicReviewView({
             <span>Edit post</span>
             <textarea
               id="linkedin-post-copy"
-              value={linkedInPost}
+              value={storedLinkedInParts.content}
               readOnly={!canEdit || busy !== null}
               aria-busy={linkedInBusy || linkedInSaving}
-              maxLength={3000}
               onChange={(event) => {
-                updateLinkedInPost(event.target.value);
+                updateLinkedInPost(
+                  replaceLinkedInPostContent(
+                    linkedInPost,
+                    event.target.value,
+                  ),
+                );
                 setCopyStatus("idle");
               }}
               rows={10}
             />
           </label>
+          {linkedInParts.sourceFooter && (
+            <div className="organic-linkedin-source" aria-label="Source footer">
+              <span>Included when copied</span>
+              <p>{linkedInParts.sourceFooter}</p>
+            </div>
+          )}
           <div className="organic-linkedin-post-footer">
             <span className="organic-linkedin-count">
-              {linkedInPost.length.toLocaleString()} characters
+              {linkedInCharacterCount.toLocaleString()} /{" "}
+              {LINKEDIN_POST_MAX_CHARACTERS.toLocaleString()} characters
+              {linkedInHasSource ? " (source excluded)" : ""}
             </span>
             <span
               className={`organic-linkedin-copy-status ${
-                copyStatus === "failed" ? "is-error" : ""
+                copyStatus === "failed" ||
+                !linkedInHasSource ||
+                linkedInHasExtraSource ||
+                linkedInTooLong
+                  ? "is-error"
+                  : ""
               }`}
               role="status"
               aria-live="polite"
@@ -327,7 +385,13 @@ export function OrganicReviewView({
                 ? "Copied to clipboard"
                 : copyStatus === "failed"
                   ? "Select the text and copy manually"
-                  : ""}
+                  : linkedInHasExtraSource
+                    ? "Source links are added automatically"
+                    : !linkedInHasSource
+                      ? "A valid episode source is required"
+                      : linkedInTooLong
+                        ? "Shorten the post copy before saving"
+                        : ""}
             </span>
             <div className="organic-linkedin-post-actions">
               {canEdit && (
@@ -345,7 +409,12 @@ export function OrganicReviewView({
                     type="button"
                     className="organic-btn organic-btn-outline compact"
                     disabled={
-                      busy !== null || !linkedInDirty || !linkedInPost.trim()
+                      busy !== null ||
+                      !linkedInDirty ||
+                      !linkedInHasContent ||
+                      !linkedInHasSource ||
+                      linkedInHasExtraSource ||
+                      linkedInTooLong
                     }
                     aria-busy={linkedInSaving}
                     onClick={() => void saveLinkedInPost()}
@@ -357,7 +426,12 @@ export function OrganicReviewView({
               <button
                 type="button"
                 className="organic-btn organic-btn-lime compact"
-                disabled={!linkedInPost.trim()}
+                disabled={
+                  !linkedInHasContent ||
+                  !linkedInHasSource ||
+                  linkedInHasExtraSource ||
+                  linkedInTooLong
+                }
                 onClick={() => void copyLinkedInPost()}
               >
                 {copyStatus === "copied" ? "Copied" : "Copy post"}

@@ -1,8 +1,14 @@
 import { authErrorResponse, currentOwner } from "../../../../../lib/auth";
+import { generateLinkedInPost } from "../../../../../lib/linkedin-post";
 import {
-  generateLinkedInPost,
+  appendLinkedInPostSource,
+  containsLinkedInPostSourceReference,
   LINKEDIN_POST_MAX_CHARACTERS,
-} from "../../../../../lib/linkedin-post";
+  linkedInPostCharacterCount,
+  primaryLinkedInPostSource,
+  resolveLinkedInSourceCta,
+  splitLinkedInPostSource,
+} from "../../../../../lib/linkedin-post-format";
 import {
   EpisodeNotFoundError,
   getDashboardState,
@@ -32,10 +38,18 @@ export async function POST(
         { status: 400 },
       );
     }
+    const source = primaryLinkedInPostSource(episode, state.items);
+    if (!source) {
+      return Response.json(
+        { error: "This episode does not have a valid source citation." },
+        { status: 400 },
+      );
+    }
 
     const generated = await generateLinkedInPost({
       title: episode.title,
       transcript,
+      source,
     });
     await saveLinkedInPost(ownerId, id, generated.post);
     return Response.json({
@@ -68,6 +82,11 @@ export async function PATCH(
   try {
     const ownerId = await currentOwner("editor");
     const { id } = await context.params;
+    const state = await getDashboardState(ownerId);
+    const episode = state.episodes.find((candidate) => candidate.id === id);
+    if (!episode) {
+      return Response.json({ error: "Episode not found." }, { status: 404 });
+    }
     let body: unknown;
     try {
       body = await request.json();
@@ -82,19 +101,55 @@ export async function PATCH(
     if (typeof post !== "string" || !post.trim()) {
       return Response.json({ error: "A LinkedIn post is required." }, { status: 400 });
     }
+    const source = primaryLinkedInPostSource(episode, state.items);
+    if (!source) {
+      return Response.json(
+        { error: "This episode does not have a valid source citation." },
+        { status: 400 },
+      );
+    }
     const normalizedPost = post.trim();
-    if (normalizedPost.length > LINKEDIN_POST_MAX_CHARACTERS) {
+    const submittedParts = splitLinkedInPostSource(normalizedPost);
+    const content = submittedParts.content.trim();
+    if (!content) {
+      return Response.json(
+        { error: "A LinkedIn post is required before the source footer." },
+        { status: 400 },
+      );
+    }
+    if (containsLinkedInPostSourceReference(content)) {
       return Response.json(
         {
-          error: `LinkedIn posts must be no more than ${LINKEDIN_POST_MAX_CHARACTERS} characters.`,
+          error:
+            "Keep source names and URLs in the source footer; post copy can contain only the generated source.",
         },
         { status: 400 },
       );
     }
+    if (
+      linkedInPostCharacterCount(normalizedPost) >
+      LINKEDIN_POST_MAX_CHARACTERS
+    ) {
+      return Response.json(
+        {
+          error: `LinkedIn post copy must be no more than ${LINKEDIN_POST_MAX_CHARACTERS} characters (the source footer is excluded).`,
+        },
+        { status: 400 },
+      );
+    }
+    const sourceCta = resolveLinkedInSourceCta(
+      episode.linkedInPost,
+      episode.title,
+    );
+    const postWithSource = appendLinkedInPostSource(
+      content,
+      source,
+      sourceCta,
+    );
 
-    await saveLinkedInPost(ownerId, id, normalizedPost);
+    await saveLinkedInPost(ownerId, id, postWithSource);
     return Response.json({
-      post: normalizedPost,
+      post: postWithSource,
       state: await getDashboardState(ownerId),
     });
   } catch (error) {

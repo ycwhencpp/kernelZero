@@ -2327,6 +2327,33 @@ img {
   box-shadow: 0 0 0 3px rgba(185, 239, 101, 0.28);
 }
 
+.organic-linkedin-source {
+  margin-top: 12px;
+  padding: 14px 18px;
+  border: 1px solid rgba(69, 104, 0, 0.24);
+  border-radius: 8px;
+  background: rgba(185, 239, 101, 0.1);
+}
+
+.organic-linkedin-source > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--lime-dark);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.organic-linkedin-source p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .organic-linkedin-post-footer {
   display: flex;
   align-items: center;

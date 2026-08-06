@@ -68,6 +68,17 @@ import {
   resolveLinkedInPostEditorValue,
 } from "../lib/linkedin-post-editor.ts";
 import {
+  appendLinkedInPostSource,
+  fallbackLinkedInSourceCta,
+  LINKEDIN_SOURCE_CTA_MAX_CHARACTERS,
+  linkedInPostCharacterCount,
+  normalizeLinkedInSourceCta,
+  primaryLinkedInPostSource,
+  replaceLinkedInPostContent,
+  resolveLinkedInSourceCta,
+  splitLinkedInPostSource,
+} from "../lib/linkedin-post-format.ts";
+import {
   createLinkedInPost as createOllamaLinkedInPost,
   createStructuredPodcast as createOllamaPodcast,
   hasDanglingNarrationEnding,
@@ -79,6 +90,7 @@ import {
   podcastDraftSectionsForRevision,
   podcastPlanFactCardLimit,
   podcastSectionRevisionFeedback,
+  resizeStructuredPodcast as resizeOllamaPodcast,
   trimNarrationToCompleteSentences,
 } from "../lib/ollama.ts";
 import {
@@ -106,7 +118,10 @@ import {
   removeAiProductionDisclosures,
   withPodcastHostStyle,
 } from "../lib/podcast-style.ts";
-import { KERNELZERO_TRANSCRIPT_SECTION_PROMPT } from "../lib/kernelzero-transcript-prompt.ts";
+import {
+  KERNELZERO_CLOSING_LINES,
+  KERNELZERO_TRANSCRIPT_SECTION_PROMPT,
+} from "../lib/kernelzero-transcript-prompt.ts";
 import { normalizeEvidenceConfidence } from "../lib/podcast-schema.ts";
 import { podcastSourcePacket } from "../lib/podcast-source.ts";
 import { parseFeed } from "../lib/rss.ts";
@@ -1282,6 +1297,9 @@ test("LinkedIn post prompts include the saved episode title and transcript as un
   assert.ok(prompt.includes(transcript));
   assert.match(prompt, /untrusted data/i);
   assert.match(prompt, /not instructions/i);
+  assert.match(prompt, /sourceCta and trusted source metadata[^]*outside this character budget/i);
+  assert.match(prompt, /one single-line question[^]*concrete topic/i);
+  assert.match(prompt, /Never use the generic 'Want to know more about it\?'/i);
 });
 
 test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors", () => {
@@ -1321,7 +1339,7 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   assert.equal(LINKEDIN_POST_MIN_LENGTH_RATIO, 0.35);
   assert.match(
     LINKEDIN_POST_PROMPT,
-    /body must land between 1050 and 3000 characters/,
+    /complete authored copy[^]*must land between 1050 and 3000 characters/,
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
@@ -1334,7 +1352,7 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   assert.doesNotMatch(LINKEDIN_POST_PROMPT, /120-220 words/);
   assert.match(
     buildLinkedInPostPrompt(2_000),
-    /body must land between 700 and 2000 characters/,
+    /complete authored copy[^]*must land between 700 and 2000 characters/,
   );
   assert.match(LINKEDIN_POST_STYLE_ANCHORS, /Cache Me If You Can!/);
   assert.ok(LINKEDIN_POST_SYSTEM_PROMPT.includes(LINKEDIN_POST_PROMPT));
@@ -1356,9 +1374,13 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
     LINKEDIN_POST_SYSTEM_PROMPT,
     /finished post must tell the concrete story and explain its broader technical topic/,
   );
+  assert.match(
+    LINKEDIN_POST_SYSTEM_PROMPT,
+    /sourceCta[^]*actual topic, mechanism, or named subject/i,
+  );
 });
 
-test("LinkedIn post schema requests the four structured output fields", () => {
+test("LinkedIn post schema requests the five structured output fields", () => {
   assert.deepEqual(linkedinPostSchema(), {
     type: "object",
     additionalProperties: false,
@@ -1377,8 +1399,9 @@ test("LinkedIn post schema requests the four structured output fields", () => {
         type: "array",
         items: { type: "string" },
       },
+      sourceCta: { type: "string" },
     },
-    required: ["mode", "title", "body", "hashtags"],
+    required: ["mode", "title", "body", "hashtags", "sourceCta"],
   });
 });
 
@@ -1387,6 +1410,7 @@ const validLinkedInDraft = {
   title: "Cache Me If You Can! 🏃‍♂️",
   body: "A request should not redo expensive work every time.\r\n\r\nRead → Cache → Reuse → Respond",
   hashtags: ["#Caching", "#Backend", "#SystemDesign", "#Engineering", "#Performance"],
+  sourceCta: "Want to see how caching prevents repeated work?",
 } as const;
 
 test("LinkedIn post output validation composes and normalizes a structured draft", () => {
@@ -1404,6 +1428,414 @@ test("LinkedIn post output validation composes and normalizes a structured draft
       mode: "incident_research_report",
     }),
     expected,
+  );
+});
+
+test("LinkedIn post output appends one trusted source footer outside the character budget", () => {
+  const source = {
+    name: "Test Journal",
+    url: "https://example.com/paper",
+  };
+  const corePost = normalizeLinkedInPost(validLinkedInDraft).post;
+  const result = normalizeLinkedInPost(validLinkedInDraft, source).post;
+
+  assert.equal(
+    result,
+    [
+      corePost,
+      validLinkedInDraft.sourceCta,
+      "Source: Test Journal\nhttps://example.com/paper",
+    ].join("\n\n"),
+  );
+  assert.equal(linkedInPostCharacterCount(result), corePost.length);
+  assert.deepEqual(splitLinkedInPostSource(result), {
+    content: corePost,
+    sourceCta: validLinkedInDraft.sourceCta,
+    sourceFooter:
+      `${validLinkedInDraft.sourceCta}\n\nSource: Test Journal\nhttps://example.com/paper`,
+  });
+  assert.equal((result.match(/Source:/g) ?? []).length, 1);
+});
+
+test("LinkedIn contextual source footer stays canonical while editable copy changes", () => {
+  const sourceCta = "Want to trace how the cache fix avoids repeated work?";
+  const generated = appendLinkedInPostSource(
+    "Original copy",
+    {
+      name: "Primary Source",
+      url: "https://example.com/source",
+    },
+    sourceCta,
+  );
+  const edited = replaceLinkedInPostContent(
+    generated,
+    "Edited first paragraph\n\n",
+  );
+
+  assert.deepEqual(splitLinkedInPostSource(edited), {
+    content: "Edited first paragraph\n\n",
+    sourceCta,
+    sourceFooter:
+      `${sourceCta}\n\nSource: Primary Source\nhttps://example.com/source`,
+  });
+  assert.equal(linkedInPostCharacterCount(edited), 22);
+});
+
+test("LinkedIn editor strips pasted footers before restoring the read-only CTA", () => {
+  const trustedCta = "Want to trace how request coalescing stops a cache stampede?";
+  const generated = appendLinkedInPostSource(
+    "Original copy",
+    { name: "Trusted Source", url: "https://example.com/trusted" },
+    trustedCta,
+  );
+  const edited = replaceLinkedInPostContent(
+    generated,
+    [
+      "Edited copy",
+      "Want to inspect a pasted and untrusted topic?",
+      "Source: Fake Source\nhttps://fake.example/story",
+    ].join("\n\n"),
+  );
+
+  assert.deepEqual(splitLinkedInPostSource(edited), {
+    content: "Edited copy",
+    sourceCta: trustedCta,
+    sourceFooter:
+      `${trustedCta}\n\nSource: Trusted Source\nhttps://example.com/trusted`,
+  });
+  assert.doesNotMatch(edited, /Fake Source|fake\.example|untrusted topic/);
+});
+
+test("LinkedIn source composition replaces stale and duplicate stored footers", () => {
+  const stale = [
+    "Original copy",
+    "Want to know more about it?",
+    "Source: Stale Source\nhttps://stale.example/story",
+    "Want to know more about it?",
+    "Source: Duplicate Source\nhttps://duplicate.example/story",
+  ].join("\n\n");
+  const canonicalCta = "Want to compare how both cache failures were diagnosed?";
+  const canonical = appendLinkedInPostSource(
+    stale,
+    {
+      name: "Current Source",
+      url: "https://current.example/story",
+    },
+    canonicalCta,
+  );
+
+  assert.equal((canonical.match(/Source:/g) ?? []).length, 1);
+  assert.doesNotMatch(canonical, /Stale Source|Duplicate Source/);
+  assert.ok(
+    canonical.endsWith(
+      "Source: Current Source\nhttps://current.example/story",
+    ),
+  );
+  assert.deepEqual(splitLinkedInPostSource(canonical), {
+    content: "Original copy",
+    sourceCta: canonicalCta,
+    sourceFooter:
+      `${canonicalCta}\n\nSource: Current Source\nhttps://current.example/story`,
+  });
+});
+
+test("LinkedIn source parsing preserves copy added after a footer and ignores handwritten citations", () => {
+  const sourceCta = "Want to inspect the benchmark setup behind these results?";
+  const generated = appendLinkedInPostSource(
+    "Original copy",
+    {
+      name: "Primary Source",
+      url: "https://example.com/source",
+    },
+    sourceCta,
+  );
+  const withLaterCopy = `${generated}\n\nA new ending.`;
+  const recomposed = appendLinkedInPostSource(
+    withLaterCopy,
+    {
+      name: "Primary Source",
+      url: "https://example.com/source",
+    },
+    sourceCta,
+  );
+
+  assert.equal(
+    splitLinkedInPostSource(withLaterCopy).content,
+    "Original copy\n\nA new ending.",
+  );
+  assert.equal((recomposed.match(/Source:/g) ?? []).length, 1);
+  assert.ok(recomposed.endsWith("https://example.com/source"));
+  assert.deepEqual(
+    splitLinkedInPostSource(
+      "Read the study\n\nSource: A handwritten citation\nhttps://example.com/manual",
+    ),
+    {
+      content:
+        "Read the study\n\nSource: A handwritten citation\nhttps://example.com/manual",
+      sourceCta: null,
+      sourceFooter: null,
+    },
+  );
+});
+
+test("LinkedIn source parsing handles footer-only posts and normalized URLs", () => {
+  const sourceCta = "Want to inspect how URL normalization protects the footer?";
+  const normalized = appendLinkedInPostSource(
+    "Post copy",
+    {
+      name: "Source Name",
+      url: "https://example.com/a b",
+    },
+    sourceCta,
+  );
+  const sourceFooter = splitLinkedInPostSource(normalized).sourceFooter;
+
+  assert.ok(normalized.endsWith("https://example.com/a%20b"));
+  assert.ok(sourceFooter);
+  assert.deepEqual(splitLinkedInPostSource(sourceFooter), {
+    content: "",
+    sourceCta,
+    sourceFooter,
+  });
+});
+
+test("LinkedIn contextual source invitations are bounded and reject generic or unsafe copy", () => {
+  const maxLengthCta = `Want to ${"x".repeat(
+    LINKEDIN_SOURCE_CTA_MAX_CHARACTERS - 9,
+  )}?`;
+  assert.equal(maxLengthCta.length, LINKEDIN_SOURCE_CTA_MAX_CHARACTERS);
+  assert.equal(normalizeLinkedInSourceCta(maxLengthCta), maxLengthCta);
+  assert.equal(
+    normalizeLinkedInSourceCta(`${maxLengthCta.slice(0, -1)}x?`),
+    null,
+  );
+
+  for (const invalid of [
+    "Want to know more about it?",
+    "Want to learn more about this?",
+    "Curious how cache stampedes happen?",
+    "Want to inspect\nthe cache stampede?",
+    "Want to inspect\\nthe cache stampede?",
+    "Want to read https://example.com/cache?",
+    "Want to read ftp://fake.example/cache?",
+    "Want to inspect www.fake.example/cache?",
+    "Want to inspect fake.example/report details?",
+    "Want to inspect example.com for the report?",
+    "Want to email mailto:fake@example.com about caching?",
+    "Want to inspect Source: Cache Weekly?",
+    "Want to inspect #Caching in more detail?",
+  ]) {
+    assert.equal(normalizeLinkedInSourceCta(invalid), null, invalid);
+  }
+
+  assert.equal(
+    normalizeLinkedInSourceCta("Want to see how Node.js handles the cache?"),
+    "Want to see how Node.js handles the cache?",
+  );
+
+  assert.equal(
+    fallbackLinkedInSourceCta("Cache Stampedes: Why One Miss Becomes Thousands"),
+    "Want to explore Cache Stampedes: Why One Miss Becomes Thousands in more detail?",
+  );
+  assert.equal(
+    fallbackLinkedInSourceCta("https://only.example #OnlyTag"),
+    "Want to explore the topic covered in this episode in more detail?",
+  );
+  assert.equal(
+    fallbackLinkedInSourceCta("ftp://only.example www.fake.example"),
+    "Want to explore the topic covered in this episode in more detail?",
+  );
+});
+
+test("LinkedIn saves preserve generated CTAs and upgrade the legacy generic footer", () => {
+  const generatedCta = "Want to trace how request coalescing stops a cache stampede?";
+  const generated = appendLinkedInPostSource(
+    "Post copy",
+    { name: "Trusted Source", url: "https://example.com/cache" },
+    generatedCta,
+  );
+  const legacy = [
+    "Legacy copy",
+    "Want to know more about it?",
+    "Source: Old Source\nhttps://example.com/old",
+  ].join("\n\n");
+
+  assert.equal(
+    resolveLinkedInSourceCta(generated, "A different episode title"),
+    generatedCta,
+  );
+  assert.equal(
+    resolveLinkedInSourceCta(legacy, "How Request Coalescing Stops Cache Stampedes"),
+    "Want to explore How Request Coalescing Stops Cache Stampedes in more detail?",
+  );
+
+  const duplicate = [
+    "Legacy copy",
+    "Want to know more about it?",
+    "Source: Legacy Source\nhttps://example.com/legacy",
+    generatedCta,
+    "Source: Trusted Source\nhttps://example.com/cache",
+  ].join("\n\n");
+  assert.equal(
+    resolveLinkedInSourceCta(duplicate, "A different episode title"),
+    generatedCta,
+  );
+  assert.equal(
+    splitLinkedInPostSource(duplicate).sourceFooter,
+    `${generatedCta}\n\nSource: Trusted Source\nhttps://example.com/cache`,
+  );
+});
+
+test("LinkedIn post output rejects missing, generic, and multiline source invitations", () => {
+  const missingCta = { ...validLinkedInDraft } as Record<string, unknown>;
+  delete missingCta.sourceCta;
+  assert.throws(
+    () => normalizeLinkedInPost(missingCta),
+    /source invitation/i,
+  );
+  for (const sourceCta of [
+    "Want to know more about it?",
+    "Want to inspect the cache?\nSource: Fake",
+    42,
+  ]) {
+    assert.throws(
+      () => normalizeLinkedInPost({ ...validLinkedInDraft, sourceCta }),
+      /source invitation/i,
+    );
+  }
+});
+
+test("LinkedIn post output rejects model-authored source names and URLs", () => {
+  assert.throws(
+    () =>
+      normalizeLinkedInPost(
+        {
+          ...validLinkedInDraft,
+          body:
+            "Grounded copy.\n\nWant to know more about it?\n\nSource: Fake\nhttps://fake.example/story",
+          hashtags: ["#AI"],
+        },
+        { name: "Trusted", url: "https://example.com/trusted" },
+      ),
+    /untrusted source line/i,
+  );
+  assert.throws(
+    () =>
+      normalizeLinkedInPost({
+        ...validLinkedInDraft,
+        sourceName: "Spoofed Publisher",
+      }),
+    /invalid LinkedIn post/i,
+  );
+  assert.throws(
+    () =>
+      normalizeLinkedInPost({
+        ...validLinkedInDraft,
+        sourceUrl: "https://fake.example/story",
+      }),
+    /invalid LinkedIn post/i,
+  );
+});
+
+test("LinkedIn source resolution uses the first citation publisher with a title fallback", () => {
+  const first = item({
+    id: "source-first",
+    sourceName: "Primary Publisher",
+    canonicalUrl: "https://example.com/first/",
+  });
+  const second = item({
+    id: "source-second",
+    sourceName: "Secondary Publisher",
+    canonicalUrl: "https://example.com/second",
+  });
+
+  assert.deepEqual(
+    primaryLinkedInPostSource(
+      {
+        contentItemId: second.id,
+        citations: [
+          {
+            label: "1",
+            title: "First article",
+            url: "https://EXAMPLE.com/first",
+          },
+          { label: "2", title: "Second article", url: second.canonicalUrl },
+        ],
+      },
+      [second, first],
+    ),
+    { name: "Primary Publisher", url: "https://example.com/first" },
+  );
+  assert.deepEqual(
+    primaryLinkedInPostSource(
+      {
+        citations: [
+          {
+            label: "1",
+            title: "Citation-only source",
+            url: "https://outside.example/source",
+          },
+        ],
+      },
+      [first, second],
+    ),
+    {
+      name: "Citation-only source",
+      url: "https://outside.example/source",
+    },
+  );
+  assert.deepEqual(
+    primaryLinkedInPostSource(
+      {
+        citations: [
+          {
+            label: "1",
+            title: "Encoded article",
+            url: "https://EXAMPLE.com/a%7Eb",
+          },
+        ],
+      },
+      [
+        item({
+          sourceName: "Encoded Publisher",
+          canonicalUrl: "https://example.com/a~b/",
+        }),
+      ],
+    ),
+    {
+      name: "Encoded Publisher",
+      url: "https://example.com/a%7Eb",
+    },
+  );
+});
+
+test("LinkedIn source footer does not reduce the 3000-character copy allowance", () => {
+  const exactLimitDraft = {
+    ...validLinkedInDraft,
+    title: "T",
+    body: "x".repeat(LINKEDIN_POST_MAX_CHARACTERS - 3),
+    hashtags: [],
+  };
+  const result = normalizeLinkedInPost(exactLimitDraft, {
+    name: "A source whose footer extends the stored post",
+    url: "https://example.com/long-source-url",
+  }).post;
+
+  assert.ok(result.length > LINKEDIN_POST_MAX_CHARACTERS);
+  assert.equal(
+    linkedInPostCharacterCount(result),
+    LINKEDIN_POST_MAX_CHARACTERS,
+  );
+  assert.equal(
+    appendLinkedInPostSource(
+      result,
+      {
+        name: "Replacement source",
+        url: "https://example.com/replacement",
+      },
+      "Want to verify the exact character-budget boundary?",
+    ).match(/Source:/g)?.length,
+    1,
   );
 });
 
@@ -1546,6 +1978,8 @@ test("LinkedIn post generation uses the configured provider and returns its norm
           title: "A Grounded Post 🧠",
           body: "A grounded LinkedIn post generated from the transcript.",
           hashtags: ["#AI", "#Backend", "#Systems", "#Engineering", "#Podcast"],
+          sourceCta:
+            "Want to see how the transcript grounds this systems story?",
         }),
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
@@ -1556,11 +1990,15 @@ test("LinkedIn post generation uses the configured provider and returns its norm
     const result = await generateLinkedInPost({
       title: "Episode title",
       transcript: "A transcript-only fact used to build the social post.",
+      source: {
+        name: "Engineering Weekly",
+        url: "https://example.com/grounded-post",
+      },
     });
 
     assert.deepEqual(result, {
       post:
-        "A Grounded Post 🧠\n\nA grounded LinkedIn post generated from the transcript.\n\n#AI #Backend #Systems #Engineering #Podcast",
+        "A Grounded Post 🧠\n\nA grounded LinkedIn post generated from the transcript.\n\n#AI #Backend #Systems #Engineering #Podcast\n\nWant to see how the transcript grounds this systems story?\n\nSource: Engineering Weekly\nhttps://example.com/grounded-post",
       provider: "openai",
     });
     assert.match(
@@ -1568,6 +2006,11 @@ test("LinkedIn post generation uses the configured provider and returns its norm
       /transcript-only fact used to build the social post/,
     );
     assert.match(JSON.stringify(requestBody), /BUILD-IN-PUBLIC DEBUGGING STORY/);
+    assert.doesNotMatch(JSON.stringify(requestBody), /Engineering Weekly/);
+    assert.doesNotMatch(
+      JSON.stringify(requestBody),
+      /example\.com\/grounded-post/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (originalProvider === undefined) delete process.env.AI_PROVIDER;
@@ -1587,6 +2030,7 @@ test("Gemini and Ollama LinkedIn adapters use the shared structured contract", a
     title: "The Cache Was Innocent 🔍",
     body: "First instinct was the cache. The transcript established a different cause.",
     hashtags: ["#Debugging", "#Backend", "#Caching", "#Engineering", "#Systems"],
+    sourceCta: "Want to trace why the cache was not the real culprit?",
   };
 
   process.env.GEMINI_API_KEY = "test-gemini-key";
@@ -2470,6 +2914,12 @@ function mockOllamaSectionNarration(
   wordCount: number,
   wordAt: (index: number) => string,
 ): string {
+  if (sectionNumber === 7) {
+    const closing = KERNELZERO_CLOSING_LINES.join("\n\n");
+    const bodyWords = wordCount - countScriptWords(closing);
+    assert.ok(bodyWords > 0, "the mocked closing section needs body words");
+    return `${Array.from({ length: bodyWords }, (_, index) => wordAt(index)).join(" ")}.\n\n${closing}`;
+  }
   if (sectionNumber !== 1) {
     return `${Array.from({ length: wordCount }, (_, index) => wordAt(index)).join(" ")}.`;
   }
@@ -2503,6 +2953,28 @@ function mockOllamaOpeningStage(
     script: `${Array.from({ length: bodyWords }, (_, index) => wordAt(index)).join(" ")}.`,
   };
 }
+
+test("Ollama revision parsing keeps the fixed closing with section seven", () => {
+  const opening =
+    `Welcome to KernelZero. ${MOCK_OLLAMA_OPENING_ORIENTATION}\n\nA distinct opening body.`;
+  const middleSections = Array.from(
+    { length: 5 },
+    (_, index) => `Distinct middle section ${index + 2}.`,
+  );
+  const closingSection = [
+    "A distinct final section body.",
+    ...KERNELZERO_CLOSING_LINES,
+  ].join("\n\n");
+
+  const parsed = podcastDraftSectionsForRevision(
+    [opening, ...middleSections, closingSection].join("\n\n"),
+  );
+
+  assert.equal(parsed.length, 7);
+  assert.equal(parsed[0], opening);
+  assert.deepEqual(parsed.slice(1, 6), middleSections);
+  assert.equal(parsed[6], closingSection);
+});
 
 test("Ollama regeneration reuses all seven drafts after the opening paragraph break", async () => {
   const originalFetch = globalThis.fetch;
@@ -2638,6 +3110,7 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
   let openingOrientationPrompt = "";
   let openingBodyPrompt = "";
   let narrativeCriticPrompt = "";
+  const writerSystemPrompts: string[] = [];
 
   const ndjson = (content: unknown) =>
     new Response(
@@ -2693,6 +3166,7 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
       const sectionNumber = Number(
         user.match(/Section (\d+) focus:/)?.[1],
       );
+      writerSystemPrompts.push(system);
       return ndjson({
         script: mockOllamaSectionNarration(
           sectionNumber,
@@ -2723,10 +3197,18 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
     );
     assert.equal(generated.title, "Parallel KernelZero");
     assert.equal(countScriptWords(generated.script), 405);
-    assert.equal(generated.script.split(/\n\s*\n/).length, 8);
+    assert.equal(generated.script.split(/\n\s*\n/).length, 11);
     assert.equal(peak, 3);
     assert.equal(criticCount, 2);
     assert.equal(requestCount, 11);
+    assert.ok(
+      writerSystemPrompts.every(
+        (prompt) =>
+          prompt.length < 2_000 &&
+          !prompt.includes("EMOTIONAL PACING") &&
+          !prompt.includes("SECTION RESPONSIBILITIES"),
+      ),
+    );
     assert.match(
       openingOrientationPrompt,
       /CURRENT_STAGE = "Opening Orientation"[^]*SOURCE METADATA ONLY/,
@@ -2887,6 +3369,261 @@ test("Ollama gives an under-length first-pass section one deficit-aware rewrite"
   }
 });
 
+test("Ollama retries a critic repair that would collapse a healthy section", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  process.env.OLLAMA_PARALLELISM = "3";
+  const sectionWords = [28, 53, 73, 77, 49, 77, 48];
+  const unsupportedDetail = "invented cascade result";
+  const writerCalls = Array.from({ length: 7 }, () => 0);
+  const repairPrompts: string[] = [];
+  let evidenceCalls = 0;
+  let narrativeCalls = 0;
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      return ndjson({
+        title: "Length-preserving critic repair",
+        dek: "Evidence fixes retain the useful section around them.",
+        facts: [],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Section ${index + 1} focus.`,
+        })),
+      });
+    }
+    const openingStage = mockOllamaOpeningStage(
+      user,
+      sectionWords[0],
+      (index) => `section1word${index}`,
+    );
+    if (openingStage) return ndjson(openingStage);
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
+      const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      writerCalls[sectionNumber - 1] += 1;
+      const revision = writerCalls[sectionNumber - 1];
+      if (sectionNumber === 3 && revision > 1) repairPrompts.push(user);
+
+      if (sectionNumber === 3 && revision === 1) {
+        const fillerWords = sectionWords[2] - countScriptWords(unsupportedDetail);
+        return ndjson({
+          script: `${unsupportedDetail} ${Array.from(
+            { length: fillerWords },
+            (_, index) => `section3initial${index}`,
+          ).join(" ")}.`,
+          claims: [],
+        });
+      }
+      const wordCount = sectionNumber === 3 && revision === 2
+        ? 13
+        : sectionWords[sectionNumber - 1];
+      return ndjson({
+        script: mockOllamaSectionNarration(
+          sectionNumber,
+          wordCount,
+          (index) => `section${sectionNumber}revision${revision}word${index}`,
+        ),
+        claims: [],
+      });
+    }
+    if (system.includes("source-fabrication checker")) {
+      evidenceCalls += 1;
+      return ndjson({
+        issues: evidenceCalls === 1
+          ? [{
+              sectionNumber: 3,
+              problem: "One method result is unsupported.",
+              instruction: "Remove the unsupported result and preserve the grounded explanation.",
+              kind: "method_result",
+              unsupportedDetail,
+            }]
+          : [],
+      });
+    }
+    if (system.includes("podcast narrative editor")) {
+      narrativeCalls += 1;
+      return ndjson({ issues: [] });
+    }
+    if (/Write \d+–\d+ new words for section/.test(user)) {
+      throw new Error("A collapsed critic repair must be retried before episode expansion.");
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    const generated = await createOllamaPodcast(
+      [item()],
+      "daily_digest",
+      "brief",
+    );
+
+    assert.equal(countScriptWords(generated.script), 405);
+    assert.doesNotMatch(generated.script, /invented cascade result/);
+    assert.deepEqual(writerCalls, [0, 1, 3, 1, 1, 1, 1]);
+    assert.equal(evidenceCalls, 2);
+    assert.equal(narrativeCalls, 2);
+    assert.equal(repairPrompts.length, 2);
+    assert.match(repairPrompts[0], /Evidence \(method_result\)/);
+    assert.match(
+      repairPrompts[1],
+      /LENGTH REPAIR ATTEMPT 2:[^]*previous draft had 13 words[^]*deficit of 60 words/i,
+    );
+    assert.match(repairPrompts[1], /Evidence \(method_result\)/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
+test("Ollama restores the fixed closing after a critic rewrites section seven", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  process.env.OLLAMA_PARALLELISM = "3";
+  const sectionWords = [28, 53, 73, 77, 49, 77, 48];
+  const unsupportedDetail = "invented closing prediction";
+  let sectionSevenCalls = 0;
+  let evidenceCalls = 0;
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      return ndjson({
+        title: "Closing repair",
+        dek: "The application owns the final sign-off.",
+        facts: [],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Section ${index + 1} focus.`,
+        })),
+      });
+    }
+    const openingStage = mockOllamaOpeningStage(
+      user,
+      sectionWords[0],
+      (index) => `closing1word${index}`,
+    );
+    if (openingStage) return ndjson(openingStage);
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
+      const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      if (sectionNumber !== 7) {
+        if (sectionNumber === 2) {
+          return ndjson({
+            script: `${Array.from(
+              { length: sectionWords[1] },
+              (_, index) => `closing2word${index}`,
+            ).join(" ")}.\n\n${KERNELZERO_CLOSING_LINES[1]}`,
+            claims: [],
+          });
+        }
+        return ndjson({
+          script: mockOllamaSectionNarration(
+            sectionNumber,
+            sectionWords[sectionNumber - 1],
+            (index) => `closing${sectionNumber}word${index}`,
+          ),
+          claims: [],
+        });
+      }
+
+      sectionSevenCalls += 1;
+      if (sectionSevenCalls === 1) {
+        const closing = KERNELZERO_CLOSING_LINES.join("\n\n");
+        const fillerWords = sectionWords[6] -
+          countScriptWords(closing) -
+          countScriptWords(unsupportedDetail);
+        return ndjson({
+          script: `${unsupportedDetail} ${Array.from(
+            { length: fillerWords },
+            (_, index) => `closing7initial${index}`,
+          ).join(" ")}.\n\n${closing}`,
+          claims: [],
+        });
+      }
+      return ndjson({
+        script: `${Array.from(
+          { length: sectionWords[6] },
+          (_, index) => `closing7repair${index}`,
+        ).join(" ")}.`,
+        claims: [],
+      });
+    }
+    if (system.includes("source-fabrication checker")) {
+      evidenceCalls += 1;
+      return ndjson({
+        issues: evidenceCalls === 1
+          ? [{
+              sectionNumber: 7,
+              problem: "The prediction is unsupported.",
+              instruction: "Remove the prediction and retain the fixed closing.",
+              kind: "method_result",
+              unsupportedDetail,
+            }]
+          : [],
+      });
+    }
+    if (system.includes("podcast narrative editor")) {
+      return ndjson({ issues: [] });
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    const generated = await createOllamaPodcast(
+      [item()],
+      "daily_digest",
+      "brief",
+    );
+    const closing = KERNELZERO_CLOSING_LINES.join("\n\n");
+
+    assert.equal(sectionSevenCalls, 2);
+    assert.doesNotMatch(generated.script, /invented closing prediction/);
+    assert.ok(generated.script.endsWith(closing));
+    for (const line of KERNELZERO_CLOSING_LINES) {
+      assert.equal(generated.script.split(line).length - 1, 1);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
 test("Ollama fills a short episode with one parallel addendum pass", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
@@ -2901,6 +3638,7 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
   let writerCalls = 0;
   let expansionCalls = 0;
   const expansionPrompts: string[] = [];
+  const expansionSystemPrompts: string[] = [];
   let activeExpansions = 0;
   let peakExpansions = 0;
 
@@ -2962,6 +3700,7 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
     ) {
       expansionCalls += 1;
       expansionPrompts.push(user);
+      expansionSystemPrompts.push(system);
       activeExpansions += 1;
       peakExpansions = Math.max(peakExpansions, activeExpansions);
       const match = user.match(
@@ -3005,11 +3744,20 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
       ),
     );
     assert.ok(
+      expansionSystemPrompts.every(
+        (prompt) =>
+          prompt.length < 2_000 &&
+          !prompt.includes("EMOTIONAL PACING") &&
+          !prompt.includes("SECTION RESPONSIBILITIES"),
+      ),
+    );
+    assert.ok(
       decisionLogs.some((entry) =>
         /decision=first_pass total_words=\d+ deficit_words=\d+ target_words=1215/.test(
           entry,
         )
       ),
+      decisionLogs.join("\n"),
     );
     assert.ok(
       decisionLogs.some((entry) =>
@@ -3032,6 +3780,447 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
     else process.env.OLLAMA_PARALLELISM = originalParallelism;
     if (originalLogTimings === undefined) delete process.env.OLLAMA_LOG_TIMINGS;
     else process.env.OLLAMA_LOG_TIMINGS = originalLogTimings;
+  }
+});
+
+test("Ollama resize expands the existing draft without rerunning section writers", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  process.env.OLLAMA_PARALLELISM = "3";
+  const longSource = item({
+    summary:
+      `Grounded evidence sentence. ${'{}[],"\\\\ token_dense '.repeat(2_000)}`,
+  });
+  const sectionWords = [80, 140, 160, 170, 120, 180, 150];
+  const closing = KERNELZERO_CLOSING_LINES.join("\n\n");
+  const closingBodyWords = sectionWords[6] - countScriptWords(closing);
+  const draftSections = sectionWords.map((wordCount, index) => {
+    if (index === 0) {
+      return mockOllamaSectionNarration(
+        1,
+        wordCount,
+        (wordIndex) => `resize1original${wordIndex}`,
+      );
+    }
+    if (index === 6) {
+      return `${Array.from(
+        { length: closingBodyWords },
+        (_, wordIndex) => `resize7original${wordIndex}`,
+      ).join(" ")}.\n\n${closing}`;
+    }
+    return mockOllamaSectionNarration(
+      index + 1,
+      wordCount,
+      (wordIndex) => `resize${index + 1}original${wordIndex}`,
+    );
+  });
+  const draft = {
+    title: "Existing draft title",
+    dek: "Existing draft dek.",
+    script: draftSections.join("\n\n"),
+    showNotes: "Existing show notes.",
+    chapters: [{ title: "Existing chapter", startSeconds: 0 }],
+    claims: [{
+      claim: "Existing grounded claim.",
+      support: "Existing source support.",
+      confidence: 0.9,
+      location: "Findings",
+    }],
+  };
+  let planCalls = 0;
+  let expansionCalls = 0;
+  let criticCalls = 0;
+  const expansionSystems: string[] = [];
+  const expansionUsers: string[] = [];
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      planCalls += 1;
+      return ndjson({
+        title: draft.title,
+        dek: draft.dek,
+        facts: [],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Resize section ${index + 1} focus.`,
+        })),
+      });
+    }
+    if (/Write \d+–\d+ new words for section/.test(user)) {
+      expansionCalls += 1;
+      expansionSystems.push(system);
+      expansionUsers.push(user);
+      const match = user.match(
+        /Write (\d+)–(\d+) new words for section (\d+)/,
+      );
+      const additionalWords = Number(match?.[1]);
+      const sectionNumber = Number(match?.[3]);
+      return ndjson({
+        script: `${Array.from(
+          { length: additionalWords },
+          (_, index) => `resize${sectionNumber}addition${index}`,
+        ).join(" ")}.`,
+      });
+    }
+    if (
+      system.includes("source-fabrication checker") ||
+      system.includes("podcast narrative editor")
+    ) {
+      criticCalls += 1;
+      return ndjson({ issues: [] });
+    }
+    if (user.includes("The script field must contain")) {
+      throw new Error("Resize must not rerun a full section writer.");
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    const resized = await resizeOllamaPodcast(
+      draft,
+      [longSource],
+      "daily_digest",
+      "standard",
+    );
+
+    assert.equal(planCalls, 1);
+    assert.ok(expansionCalls > 0);
+    assert.equal(criticCalls, 2);
+    assert.equal(scriptMatchesEpisodeLength(resized.script, "standard"), true);
+    assert.equal(resized.title, draft.title);
+    assert.equal(resized.dek, draft.dek);
+    assert.equal(resized.showNotes, draft.showNotes);
+    assert.deepEqual(resized.chapters, draft.chapters);
+    assert.deepEqual(resized.claims, []);
+    assert.ok(resized.script.endsWith(closing));
+    let priorSentinelIndex = -1;
+    for (let sectionNumber = 1; sectionNumber <= 7; sectionNumber += 1) {
+      const sentinelIndex = resized.script.indexOf(
+        `resize${sectionNumber}original0`,
+      );
+      assert.ok(sentinelIndex > priorSentinelIndex);
+      priorSentinelIndex = sentinelIndex;
+    }
+    assert.ok(
+      expansionSystems.every((prompt) => prompt.length < 2_000),
+    );
+    assert.ok(
+      expansionUsers.every(
+        (prompt, index) =>
+          prompt.length + expansionSystems[index].length < 20_000 &&
+          prompt.includes("[Source excerpt ends here.]") &&
+          prompt.includes("[coverage excerpt shortened]") &&
+          prompt.endsWith(
+            'Return exactly {"script":"only the new paragraph"}.',
+          ),
+      ),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
+test("Ollama resize uses bounded section rewrites when every expansion is empty", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  process.env.OLLAMA_PARALLELISM = "3";
+  const sectionWords = [80, 140, 160, 170, 120, 180, 150];
+  const draftSections = sectionWords.map((wordCount, index) =>
+    mockOllamaSectionNarration(
+      index + 1,
+      wordCount,
+      (wordIndex) => `empty${index + 1}original${wordIndex}`,
+    )
+  );
+  const draft = {
+    title: "Empty expansion recovery",
+    dek: "Targeted rewrites recover a stalled resize.",
+    script: draftSections.join("\n\n"),
+    showNotes: "Existing show notes.",
+    chapters: [{ title: "Existing chapter", startSeconds: 0 }],
+    claims: [{
+      claim: "This claim cannot be mapped after section parsing.",
+      support: "Old support.",
+      confidence: 0.5,
+      location: "Old section",
+    }],
+  };
+  const denseSource = item({
+    summary: `Grounded evidence sentence. ${'{}[],"\\\\ token_dense '.repeat(2_000)}`,
+  });
+  let expansionCalls = 0;
+  const rewrittenSections: number[] = [];
+  const rewritePrompts: Array<{ system: string; user: string }> = [];
+  const rewriteCalls = new Map<number, number>();
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      return ndjson({
+        title: draft.title,
+        dek: draft.dek,
+        facts: [],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Recovery section ${index + 1} focus.`,
+        })),
+      });
+    }
+    if (/Write \d+–\d+ new words for section/.test(user)) {
+      expansionCalls += 1;
+      return ndjson({ script: "" });
+    }
+    if (
+      /write one section/i.test(system) &&
+      user.includes("Length recovery:")
+    ) {
+      const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      const targetWords = Number(
+        user.match(/script field must contain (\d+)–(\d+) words/)?.[1],
+      );
+      const rewriteCall = (rewriteCalls.get(sectionNumber) ?? 0) + 1;
+      rewriteCalls.set(sectionNumber, rewriteCall);
+      rewrittenSections.push(sectionNumber);
+      rewritePrompts.push({ system, user });
+      if (sectionNumber === 3 && rewriteCall === 1) {
+        return ndjson({
+          script: draftSections[2],
+          claims: [],
+        });
+      }
+      return ndjson({
+        script: mockOllamaSectionNarration(
+          sectionNumber,
+          targetWords,
+          (index) => `empty${sectionNumber}rewrite${index}`,
+        ),
+        claims: [],
+      });
+    }
+    if (
+      system.includes("source-fabrication checker") ||
+      system.includes("podcast narrative editor")
+    ) {
+      return ndjson({ issues: [] });
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    const resized = await resizeOllamaPodcast(
+      draft,
+      [denseSource],
+      "daily_digest",
+      "standard",
+    );
+
+    assert.ok(expansionCalls > 0);
+    assert.equal(rewrittenSections.filter((section) => section === 3).length, 2);
+    assert.equal(rewrittenSections.filter((section) => section === 4).length, 1);
+    assert.ok(
+      rewritePrompts.some(({ user }) =>
+        /LENGTH REPAIR ATTEMPT 2:[^]*previous draft had 160 words[^]*deficit of 107 words/i.test(
+          user,
+        )
+      ),
+    );
+    assert.equal(scriptMatchesEpisodeLength(resized.script, "standard"), true);
+    assert.match(resized.script, /empty3rewrite0/);
+    assert.match(resized.script, /empty4rewrite0/);
+    assert.match(resized.script, /empty2original0/);
+    assert.match(resized.script, /empty5original0/);
+    assert.deepEqual(resized.claims, []);
+    assert.ok(
+      rewritePrompts.every(
+        ({ system, user }) =>
+          system.length < 2_000 &&
+          system.length + user.length < 20_000 &&
+          user.includes("[Source excerpt ends here.]"),
+      ),
+    );
+    assert.ok(
+      resized.script.endsWith(KERNELZERO_CLOSING_LINES.join("\n\n")),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
+  }
+});
+
+test("Ollama resize retains generated section boundaries through cleanup and object spread", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalParallelism = process.env.OLLAMA_PARALLELISM;
+  process.env.OLLAMA_PARALLELISM = "3";
+  const sectionWords = [80, 140, 160, 170, 120, 180, 150];
+  const retainedClaim = {
+    claim: "The source reports a grounded mechanism.",
+    support: "The supplied source describes that mechanism.",
+    confidence: 0.9,
+    location: "Mechanisms and methods",
+  };
+  let phase: "create" | "resize" = "create";
+  let planCalls = 0;
+  let writerCalls = 0;
+  let successfulResizeExpansions = 0;
+
+  const ndjson = (content: unknown) =>
+    new Response(
+      `${JSON.stringify({
+        message: { content: JSON.stringify(content) },
+        done: true,
+        done_reason: "stop",
+      })}\n`,
+      { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+    );
+
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ content: string }>;
+    };
+    const system = body.messages[0]?.content ?? "";
+    const user = body.messages[1]?.content ?? "";
+    if (system.includes("planning editor")) {
+      planCalls += 1;
+      return ndjson({
+        title: "Retained section metadata",
+        dek: "Resize keeps the original section boundaries.",
+        facts: [],
+        sections: Array.from({ length: 7 }, (_, index) => ({
+          sectionNumber: index + 1,
+          focus: `Retained section ${index + 1} focus.`,
+        })),
+      });
+    }
+    const openingStage = phase === "create"
+      ? mockOllamaOpeningStage(
+          user,
+          sectionWords[0],
+          (index) => `retained1word${index}`,
+        )
+      : null;
+    if (openingStage) return ndjson(openingStage);
+    if (
+      /write one section/i.test(system) &&
+      user.includes("The script field must contain")
+    ) {
+      if (phase === "resize") {
+        throw new Error("Retained section metadata must prevent a full rewrite.");
+      }
+      writerCalls += 1;
+      const sectionNumber = Number(user.match(/Section (\d+) focus:/)?.[1]);
+      if (sectionNumber === 3) {
+        const firstParagraphWords = Math.floor(sectionWords[2] / 2);
+        return ndjson({
+          script: `${Array.from(
+            { length: firstParagraphWords },
+            (_, index) => `retained3aword${index}`,
+          ).join(" ")}.\n\n${Array.from(
+            { length: sectionWords[2] - firstParagraphWords },
+            (_, index) => `retained3bword${index}`,
+          ).join(" ")}.`,
+          claims: [retainedClaim],
+        });
+      }
+      return ndjson({
+        script: mockOllamaSectionNarration(
+          sectionNumber,
+          sectionWords[sectionNumber - 1],
+          (index) => `retained${sectionNumber}word${index}`,
+        ),
+        claims: [],
+      });
+    }
+    if (/Write \d+–\d+ new words for section/.test(user)) {
+      if (phase === "create") return ndjson({ script: "" });
+      successfulResizeExpansions += 1;
+      const match = user.match(
+        /Write (\d+)–(\d+) new words for section (\d+)/,
+      );
+      const additionalWords = Number(match?.[1]);
+      const sectionNumber = Number(match?.[3]);
+      return ndjson({
+        script: `${Array.from(
+          { length: additionalWords },
+          (_, index) => `retained${sectionNumber}addition${index}`,
+        ).join(" ")}.`,
+      });
+    }
+    if (
+      system.includes("source-fabrication checker") ||
+      system.includes("podcast narrative editor")
+    ) {
+      return ndjson({ issues: [] });
+    }
+    throw new Error(`Unexpected mocked Ollama stage: ${system.slice(0, 80)}`);
+  }) as typeof fetch;
+
+  try {
+    const created = await createOllamaPodcast(
+      [item()],
+      "daily_digest",
+      "standard",
+    );
+    assert.equal(countScriptWords(created.script), 1_000);
+    assert.match(created.script, /retained3aword0[^]*\n\nretained3bword0/);
+    const writerCallsBeforeResize = writerCalls;
+    const prepared = {
+      ...created,
+      script: removeAiProductionDisclosures(created.script),
+    };
+
+    phase = "resize";
+    const resized = await resizeOllamaPodcast(
+      prepared,
+      [item()],
+      "daily_digest",
+      "standard",
+    );
+
+    assert.equal(planCalls, 2);
+    assert.equal(writerCalls, writerCallsBeforeResize);
+    assert.ok(successfulResizeExpansions > 0);
+    assert.equal(scriptMatchesEpisodeLength(resized.script, "standard"), true);
+    assert.match(resized.script, /retained3aword0[^]*\n\nretained3bword0/);
+    assert.deepEqual(resized.claims, [retainedClaim]);
+    assert.ok(
+      resized.script.endsWith(KERNELZERO_CLOSING_LINES.join("\n\n")),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
+    else process.env.OLLAMA_PARALLELISM = originalParallelism;
   }
 });
 
@@ -3116,7 +4305,7 @@ test("Ollama critics repair a new evidence issue that appears on a late audit", 
           : "";
       const reservedWords = countScriptWords(includedDetail);
       return ndjson({
-        script: sectionNumber === 1
+        script: sectionNumber === 1 || sectionNumber === 7
           ? mockOllamaSectionNarration(
               sectionNumber,
               sectionWords[sectionNumber - 1],
@@ -3259,7 +4448,7 @@ test("Ollama stops after two repairs of the same evidence issue", async () => {
         ? countScriptWords(unsupportedDetail)
         : 0;
       return ndjson({
-        script: sectionNumber === 1
+        script: sectionNumber === 1 || sectionNumber === 7
           ? mockOllamaSectionNarration(
               sectionNumber,
               sectionWords[sectionNumber - 1],
