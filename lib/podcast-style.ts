@@ -88,6 +88,63 @@ function hasEarlyMechanismDetail(orientation: string): boolean {
   ).length >= 2;
 }
 
+function podcastOrientationFailures(
+  orientation: string,
+  maxWords = MAX_PODCAST_ORIENTATION_WORDS,
+): string[] {
+  const failures: string[] = [];
+  const boundedMaxWords = Math.max(
+    MIN_PODCAST_ORIENTATION_WORDS,
+    Math.floor(maxWords),
+  );
+  const orientationSentences = splitPodcastOrientationSentences(orientation);
+  const orientationWordCount = orientation
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+  if (
+    orientationSentences.length < 1 ||
+    orientationSentences.length > 2 ||
+    orientationWordCount < MIN_PODCAST_ORIENTATION_WORDS ||
+    orientationWordCount > boundedMaxWords ||
+    orientationSentences.some(
+      (sentence) => !COMPLETE_PODCAST_ORIENTATION.test(sentence),
+    ) ||
+    !hasListenerOrientationPayoff(orientation)
+  ) {
+    failures.push(
+      `use exactly one or two complete sentences (${MIN_PODCAST_ORIENTATION_WORDS}-${boundedMaxWords} spoken words total) to name this episode's concrete topic and preview what the listener will understand and why it matters before any technical detail; include a concrete listener payoff such as what they'll understand, what we'll trace, or what the next few minutes will connect`,
+    );
+  }
+  if (
+    EARLY_QUANTITATIVE_RESULT.test(orientation) ||
+    SPELLED_PERCENTAGE.test(orientation)
+  ) {
+    failures.push(
+      "reserve quantitative results, success rates, and detailed findings for the hook/body after the listener orientation",
+    );
+  }
+  if (hasEarlyMechanismDetail(orientation)) {
+    failures.push(
+      "move vulnerability identifiers and multi-step technical mechanisms into the hook/body after the listener orientation",
+    );
+  }
+  return failures;
+}
+
+/**
+ * Validates the listener-orientation sentences without requiring the fixed
+ * KernelZero greeting or the blank-line-delimited hook/body that follows it.
+ */
+export function podcastOrientationFailureMessage(
+  orientation: string,
+  maxWords = MAX_PODCAST_ORIENTATION_WORDS,
+): string | null {
+  const failures = podcastOrientationFailures(orientation.trim(), maxWords);
+  if (!failures.length) return null;
+  return `Podcast orientation validation failed: ${failures.join("; ")}.`;
+}
+
 export function podcastStyleFailureMessage(script: string): string | null {
   const failures: string[] = [];
   const trimmedScript = script.trim();
@@ -104,45 +161,15 @@ export function podcastStyleFailureMessage(script: string): string | null {
       `start the spoken script with the exact sentence "${REQUIRED_PODCAST_GREETING}"`,
     );
   }
-  const greetingCount = script.match(/Welcome to KernelZero\./g)?.length ?? 0;
+  const greetingCount = script.match(/Welcome\s+to\s+KernelZero[.!?]?/gi)?.length ??
+    0;
   if (greetingCount !== 1) {
     failures.push(
       `use "${REQUIRED_PODCAST_GREETING}" exactly once, at the start of the script`,
     );
   }
   const orientation = hasRequiredGreeting ? textAfterGreeting.trim() : "";
-  const orientationSentences = splitPodcastOrientationSentences(orientation);
-  const orientationWordCount = orientation
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length;
-  if (
-    orientationSentences.length < 1 ||
-    orientationSentences.length > 2 ||
-    orientationWordCount < MIN_PODCAST_ORIENTATION_WORDS ||
-    orientationWordCount > MAX_PODCAST_ORIENTATION_WORDS ||
-    orientationSentences.some(
-      (sentence) => !COMPLETE_PODCAST_ORIENTATION.test(sentence),
-    ) ||
-    !hasListenerOrientationPayoff(orientation)
-  ) {
-    failures.push(
-      `use exactly one or two complete sentences (${MIN_PODCAST_ORIENTATION_WORDS}-${MAX_PODCAST_ORIENTATION_WORDS} spoken words total) to name this episode's concrete topic and preview what the listener will understand and why it matters before any technical detail; include a concrete listener payoff such as what they'll understand, what we'll trace, or what the next few minutes will connect`,
-    );
-  }
-  if (
-    EARLY_QUANTITATIVE_RESULT.test(orientation) ||
-    SPELLED_PERCENTAGE.test(orientation)
-  ) {
-    failures.push(
-      "reserve quantitative results, success rates, and detailed findings for the hook/body after the listener orientation",
-    );
-  }
-  if (hasEarlyMechanismDetail(orientation)) {
-    failures.push(
-      "move vulnerability identifiers and multi-step technical mechanisms into the hook/body after the listener orientation",
-    );
-  }
+  failures.push(...podcastOrientationFailures(orientation));
   if (paragraphs.length < 2) {
     failures.push(
       "finish the greeting and listener orientation as the first paragraph, then insert a blank line before the hook and technical story",

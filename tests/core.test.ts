@@ -2481,6 +2481,29 @@ function mockOllamaSectionNarration(
   return `${opening}\n\n${Array.from({ length: bodyWords }, (_, index) => wordAt(index)).join(" ")}.`;
 }
 
+const MOCK_OLLAMA_OPENING_ORIENTATION =
+  "This episode traces efficient language model inference, so you'll understand why its engineering choices matter.";
+
+function mockOllamaOpeningStage(
+  userPrompt: string,
+  totalWords: number,
+  wordAt: (index: number) => string,
+): { orientation: string } | { script: string } | null {
+  if (userPrompt.includes('CURRENT_STAGE = "Opening Orientation"')) {
+    return { orientation: MOCK_OLLAMA_OPENING_ORIENTATION };
+  }
+  if (!userPrompt.includes('CURRENT_STAGE = "Opening Body"')) return null;
+
+  const spokenFrame = userPrompt.match(
+    /ALREADY SPOKEN - DO NOT REPEAT:\n([^\n]+)/,
+  )?.[1] ?? `Welcome to KernelZero. ${MOCK_OLLAMA_OPENING_ORIENTATION}`;
+  const bodyWords = totalWords - countScriptWords(spokenFrame);
+  assert.ok(bodyWords > 0, "the mocked staged opening needs body words");
+  return {
+    script: `${Array.from({ length: bodyWords }, (_, index) => wordAt(index)).join(" ")}.`,
+  };
+}
+
 test("Ollama regeneration reuses all seven drafts after the opening paragraph break", async () => {
   const originalFetch = globalThis.fetch;
   const originalParallelism = process.env.OLLAMA_PARALLELISM;
@@ -2495,6 +2518,7 @@ test("Ollama regeneration reuses all seven drafts after the opening paragraph br
   ];
   const currentDraft = previousSections.join("\n\n");
   const writerPrompts = Array.from({ length: 7 }, () => "");
+  const openingStageCalls = { orientation: 0, body: 0 };
 
   assert.deepEqual(
     podcastDraftSectionsForRevision(currentDraft),
@@ -2527,6 +2551,17 @@ test("Ollama regeneration reuses all seven drafts after the opening paragraph br
           focus: `Section ${index + 1} focus.`,
         })),
       });
+    }
+    const openingStage = mockOllamaOpeningStage(
+      user,
+      sectionWords[0],
+      (index) => `regenerated1word${index}`,
+    );
+    if (openingStage) {
+      openingStageCalls["orientation" in openingStage ? "orientation" : "body"] +=
+        1;
+      writerPrompts[0] = user;
+      return ndjson(openingStage);
     }
     if (
       /write one section/i.test(system) &&
@@ -2566,7 +2601,18 @@ test("Ollama regeneration reuses all seven drafts after the opening paragraph br
     );
 
     assert.equal(countScriptWords(generated.script), 405);
+    assert.deepEqual(openingStageCalls, { orientation: 1, body: 1 });
+    assert.ok(
+      generated.script.startsWith(
+        `Welcome to KernelZero. ${MOCK_OLLAMA_OPENING_ORIENTATION}\n\n`,
+      ),
+    );
+    assert.doesNotMatch(generated.script, /current draft handles agent boundaries/);
+    assert.match(writerPrompts[0], /CURRENT_STAGE = "Opening Body"/);
+    assert.match(writerPrompts[0], /REVISION FEEDBACK/);
+    assert.ok(writerPrompts[0].includes("current-draft-section-1-sentinel"));
     for (const [index, prompt] of writerPrompts.entries()) {
+      if (index === 0) continue;
       assert.match(prompt, /TARGETED REVISION ATTEMPT 1/);
       assert.ok(
         prompt.includes(`current-draft-section-${index + 1}-sentinel`),
@@ -2589,7 +2635,8 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
   let peak = 0;
   let requestCount = 0;
   let criticCount = 0;
-  let openingWriterPrompt = "";
+  let openingOrientationPrompt = "";
+  let openingBodyPrompt = "";
   let narrativeCriticPrompt = "";
 
   const ndjson = (content: unknown) =>
@@ -2629,6 +2676,16 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
         })),
       });
     }
+    const openingStage = mockOllamaOpeningStage(
+      user,
+      sectionWords[0],
+      () => "section1word",
+    );
+    if (openingStage) {
+      if ("orientation" in openingStage) openingOrientationPrompt = user;
+      else openingBodyPrompt = user;
+      return ndjson(openingStage);
+    }
     if (
       /write one section/i.test(system) &&
       user.includes("The script field must contain")
@@ -2636,7 +2693,6 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
       const sectionNumber = Number(
         user.match(/Section (\d+) focus:/)?.[1],
       );
-      if (sectionNumber === 1) openingWriterPrompt = user;
       return ndjson({
         script: mockOllamaSectionNarration(
           sectionNumber,
@@ -2670,10 +2726,14 @@ test("Ollama pipeline fans out writers and fans in parallel critics", async () =
     assert.equal(generated.script.split(/\n\s*\n/).length, 8);
     assert.equal(peak, 3);
     assert.equal(criticCount, 2);
-    assert.equal(requestCount, 10);
+    assert.equal(requestCount, 11);
     assert.match(
-      openingWriterPrompt,
-      /required KernelZero greeting[^]*load-bearing organizations, products, models, benchmarks, papers, or incidents/,
+      openingOrientationPrompt,
+      /CURRENT_STAGE = "Opening Orientation"[^]*SOURCE METADATA ONLY/,
+    );
+    assert.match(
+      openingBodyPrompt,
+      /CURRENT_STAGE = "Opening Body"[^]*ALREADY SPOKEN - DO NOT REPEAT/,
     );
     assert.match(
       narrativeCriticPrompt,
@@ -2693,6 +2753,7 @@ test("Ollama gives an under-length first-pass section one deficit-aware rewrite"
   const sectionWords = [28, 53, 73, 77, 49, 77, 48];
   const writerCalls = Array.from({ length: 7 }, () => 0);
   const sectionOnePrompts: string[] = [];
+  const openingStageCalls = { orientation: 0, body: 0 };
   const sectionTwoPrompts: string[] = [];
   const sectionThreePrompts: string[] = [];
 
@@ -2727,6 +2788,28 @@ test("Ollama gives an under-length first-pass section one deficit-aware rewrite"
           focus: `Section ${index + 1} focus.`,
         })),
       });
+    }
+    if (user.includes('CURRENT_STAGE = "Opening Orientation"')) {
+      openingStageCalls.orientation += 1;
+      sectionOnePrompts.push(user);
+      return ndjson({ orientation: MOCK_OLLAMA_OPENING_ORIENTATION });
+    }
+    if (user.includes('CURRENT_STAGE = "Opening Body"')) {
+      openingStageCalls.body += 1;
+      sectionOnePrompts.push(user);
+      if (openingStageCalls.body === 1) {
+        return ndjson({
+          script:
+            "To understand the result, we need to look at the environment.",
+        });
+      }
+      return ndjson(
+        mockOllamaOpeningStage(
+          user,
+          sectionWords[0],
+          (index) => `section1word${index}`,
+        ),
+      );
     }
     if (
       /write one section/i.test(system) &&
@@ -2775,17 +2858,18 @@ test("Ollama gives an under-length first-pass section one deficit-aware rewrite"
       ],
     );
     assert.equal(countScriptWords(generated.script), 405);
-    assert.deepEqual(writerCalls, [2, 1, 2, 1, 1, 1, 1]);
-    assert.equal(sectionOnePrompts.length, 2);
+    assert.deepEqual(writerCalls, [0, 1, 2, 1, 1, 1, 1]);
+    assert.deepEqual(openingStageCalls, { orientation: 1, body: 2 });
+    assert.equal(sectionOnePrompts.length, 3);
     assert.match(sectionOnePrompts[0], /REVISION FEEDBACK[^]*listener payoff/);
-    assert.match(sectionOnePrompts[1], /OPENING REPAIR ATTEMPT 2/);
+    assert.match(sectionOnePrompts[1], /CURRENT_STAGE = "Opening Body"/);
     assert.match(
-      sectionOnePrompts[1],
-      /Podcast style validation failed:[^]*replace the canned transition/,
+      sectionOnePrompts[2],
+      /BODY REPAIR:[^]*replace the canned "To understand X, we need to look at Y" transition/,
     );
     assert.doesNotMatch(
-      sectionOnePrompts[1],
-      /TARGETED REVISION ATTEMPT 2/,
+      sectionOnePrompts.join("\n"),
+      /OPENING REPAIR ATTEMPT|TARGETED REVISION ATTEMPT/,
     );
     assert.equal(sectionTwoPrompts.length, 1);
     assert.doesNotMatch(sectionTwoPrompts[0], /Welcome to KernelZero/);
@@ -2847,6 +2931,15 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
         })),
       });
     }
+    const openingStage = mockOllamaOpeningStage(
+      user,
+      60,
+      (index) => `initial1word${index}`,
+    );
+    if (openingStage) {
+      writerCalls += 1;
+      return ndjson(openingStage);
+    }
     if (
       /write one section/i.test(system) &&
       user.includes("The script field must contain")
@@ -2900,7 +2993,7 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
       "daily_digest",
       "standard",
     );
-    assert.equal(writerCalls, 14);
+    assert.equal(writerCalls, 15);
     assert.equal(expansionCalls, 5);
     assert.equal(peakExpansions, 3);
     assert.equal(countScriptWords(generated.script), 1_264);
@@ -2913,8 +3006,8 @@ test("Ollama fills a short episode with one parallel addendum pass", async () =>
     );
     assert.ok(
       decisionLogs.some((entry) =>
-        entry.includes(
-          "decision=first_pass total_words=399 deficit_words=816 target_words=1215",
+        /decision=first_pass total_words=\d+ deficit_words=\d+ target_words=1215/.test(
+          entry,
         )
       ),
     );
@@ -2993,6 +3086,15 @@ test("Ollama critics repair a new evidence issue that appears on a late audit", 
           focus: `Section ${index + 1} focus.`,
         })),
       });
+    }
+    const openingStage = mockOllamaOpeningStage(
+      user,
+      sectionWords[0],
+      () => "section1revision1",
+    );
+    if (openingStage) {
+      if ("orientation" in openingStage) writerCalls[0] += 1;
+      return ndjson(openingStage);
     }
     if (
       /write one section/i.test(system) &&
@@ -3138,6 +3240,15 @@ test("Ollama stops after two repairs of the same evidence issue", async () => {
         })),
       });
     }
+    const openingStage = mockOllamaOpeningStage(
+      user,
+      sectionWords[0],
+      () => "section1word",
+    );
+    if (openingStage) {
+      if ("orientation" in openingStage) writerCalls[0] += 1;
+      return ndjson(openingStage);
+    }
     if (
       /write one section/i.test(system) &&
       user.includes("The script field must contain")
@@ -3246,9 +3357,16 @@ test("Ollama falls back instead of doubling a runaway editorial plan", async () 
       /no more than 18 source-grounded fact cards/,
     );
     assert.equal(requests[1].think, false);
-    assert.ok(requests[1].options.num_predict >= 1_536);
-    assert.ok(requests[1].options.num_predict <= 3_072);
+    assert.equal(requests[1].options.num_predict, 384);
     assert.ok(requests[1].format);
+    assert.match(
+      JSON.stringify(requests[1].format),
+      /orientation/,
+    );
+    assert.match(
+      requests[1].messages?.[1]?.content ?? "",
+      /CURRENT_STAGE = "Opening Orientation"/,
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
@@ -3290,7 +3408,11 @@ test("Ollama falls back when the editorial plan stops with partial JSON", async 
     assert.equal(requests.length, 2);
     assert.match(
       requests[1].messages?.[0]?.content ?? "",
-      /write one section/i,
+      /listener-orientation beat/i,
+    );
+    assert.match(
+      requests[1].messages?.[1]?.content ?? "",
+      /CURRENT_STAGE = "Opening Orientation"/,
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -3333,9 +3455,13 @@ test("Ollama falls back to script-only JSON when a section runs away", async () 
     if (requests.length === 2) {
       return new Response(
         `${JSON.stringify({
-          message: { content: "{\"script\":\"runaway" },
+          message: {
+            content: JSON.stringify({
+              orientation: MOCK_OLLAMA_OPENING_ORIENTATION,
+            }),
+          },
           done: true,
-          done_reason: "length",
+          done_reason: "stop",
         })}\n`,
         { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
       );
@@ -3345,7 +3471,33 @@ test("Ollama falls back to script-only JSON when a section runs away", async () 
         `${JSON.stringify({
           message: {
             content: JSON.stringify({
-              script: Array.from({ length: 90 }, () => "word").join(" "),
+              script: Array.from({ length: 68 }, () => "opening").join(" ") +
+                ".",
+            }),
+          },
+          done: true,
+          done_reason: "stop",
+        })}\n`,
+        { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+      );
+    }
+    if (requests.length === 4) {
+      return new Response(
+        `${JSON.stringify({
+          message: { content: "{\"script\":\"runaway" },
+          done: true,
+          done_reason: "length",
+        })}\n`,
+        { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+      );
+    }
+    if (requests.length === 5) {
+      return new Response(
+        `${JSON.stringify({
+          message: {
+            content: JSON.stringify({
+              script: Array.from({ length: 170 }, () => "word").join(" ") +
+                ".",
             }),
           },
           done: true,
@@ -3362,20 +3514,20 @@ test("Ollama falls back to script-only JSON when a section runs away", async () 
       createOllamaPodcast([item()], "daily_digest", "standard"),
       /Stop after the script-only fallback/,
     );
-    assert.equal(requests.length, 4);
-    assert.ok(requests[1].format?.properties?.claims);
-    assert.equal(requests[1].format?.properties?.claims?.maxItems, undefined);
-    assert.ok(requests[1].format?.properties?.script);
+    assert.equal(requests.length, 6);
+    assert.ok(requests[3].format?.properties?.claims);
+    assert.equal(requests[3].format?.properties?.claims?.maxItems, undefined);
+    assert.ok(requests[3].format?.properties?.script);
     assert.doesNotMatch(
-      JSON.stringify(requests[1].format),
+      JSON.stringify(requests[3].format),
       /maxLength|maxItems|minimum|maximum|additionalProperties/,
     );
-    assert.equal(requests[2].format?.properties?.claims, undefined);
+    assert.equal(requests[4].format?.properties?.claims, undefined);
     assert.doesNotMatch(
-      JSON.stringify(requests[2].format),
+      JSON.stringify(requests[4].format),
       /maxLength|maxItems|minimum|maximum|additionalProperties/,
     );
-    assert.ok(requests[2].options.num_predict < requests[1].options.num_predict);
+    assert.ok(requests[4].options.num_predict < requests[3].options.num_predict);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalParallelism === undefined) delete process.env.OLLAMA_PARALLELISM;
