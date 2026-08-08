@@ -15,8 +15,10 @@ import { OrganicReviewView } from "./views/organic-review-view";
 import { OrganicCreateView } from "./views/organic-create-view";
 import { OrganicProfileView } from "./views/organic-profile-view";
 import {
+  applyPlaybackRate,
   clampPlaybackSeconds,
-  PLAYBACK_RATES,
+  normalizePlaybackRate,
+  type PlaybackRate,
 } from "../lib/playback";
 import {
   reconcileGeneratedEpisode,
@@ -134,7 +136,7 @@ export function DashboardClient({
     useState<OrganicView>(initialReviewReturnView);
   const [playbackSeconds, setPlaybackSeconds] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(0);
-  const [playbackRate, setPlaybackRate] = useState(1);
+  const [playbackRate, setPlaybackRate] = useState<PlaybackRate>(1);
   const [audioStatus, setAudioStatus] = useState<AudioStatus>("missing");
   const [footerYear] = useState(() => new Date().getFullYear());
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -247,6 +249,7 @@ export function DashboardClient({
         episode: Episode;
         provider: "openai" | "gemini" | "ollama";
         state: DashboardState;
+        audioError?: string;
       }>("/api/generate", {
         method: "POST",
         body: JSON.stringify(requestBody),
@@ -255,7 +258,9 @@ export function DashboardClient({
         payload.state,
         payload.episode,
       );
-      requireGeneratedAudio(generated.episode, requestBody.includeAudio);
+      if (!payload.audioError) {
+        requireGeneratedAudio(generated.episode, requestBody.includeAudio);
+      }
       setState(generated.state);
       setSelectedEpisodeId(generated.episode.id);
       setReviewReturnView("dashboard");
@@ -268,9 +273,11 @@ export function DashboardClient({
       );
       if (generated.episode.audioUrl) loadEpisodeAudio(generated.episode);
       notify(
-        regeneration
-          ? "Draft regenerated from the current version and is ready for review."
-          : "Evidence-checked script and local audio are ready for review.",
+        payload.audioError
+          ? `${payload.audioError} Use Generate Audio to retry.`
+          : regeneration
+            ? "Draft regenerated from the current version and is ready for review."
+            : "Evidence-checked script and local audio are ready for review.",
       );
     } catch (error) {
       notify(error instanceof Error ? error.message : "Generation failed.");
@@ -310,8 +317,7 @@ export function DashboardClient({
       audio.src = episode.audioUrl;
       audio.dataset.episodeId = episode.id;
       audio.preload = "auto";
-      audio.defaultPlaybackRate = playbackRate;
-      audio.playbackRate = playbackRate;
+      applyPlaybackRate(audio, playbackRate);
 
       const applyPendingSeek = () => {
         const pending = pendingSeekRef.current;
@@ -502,15 +508,10 @@ export function DashboardClient({
   };
 
   const changePlaybackRate = (rate: number) => {
-    const nextRate = PLAYBACK_RATES.includes(
-      rate as (typeof PLAYBACK_RATES)[number],
-    )
-      ? rate
-      : 1;
+    const nextRate = normalizePlaybackRate(rate);
     setPlaybackRate(nextRate);
     if (audioRef.current) {
-      audioRef.current.defaultPlaybackRate = nextRate;
-      audioRef.current.playbackRate = nextRate;
+      applyPlaybackRate(audioRef.current, nextRate);
     }
   };
 
@@ -521,6 +522,70 @@ export function DashboardClient({
     });
     setState(payload.state);
     notify("Transcript saved.");
+  };
+
+  const generateLinkedInPost = async (
+    episodeId: string,
+  ): Promise<string | null> => {
+    setBusy(`linkedin:${episodeId}`);
+    try {
+      const payload = await requestJson<{
+        post: string;
+        provider: "openai" | "gemini" | "ollama";
+        state: DashboardState;
+      }>(`/api/episodes/${encodeURIComponent(episodeId)}/linkedin-post`, {
+        method: "POST",
+      });
+      if (!payload.post.trim()) {
+        throw new Error("The generated LinkedIn post was empty. Please try again.");
+      }
+      setState(payload.state);
+      const providerLabel =
+        payload.provider === "openai"
+          ? "OpenAI"
+          : payload.provider === "gemini"
+            ? "Gemini"
+            : "Ollama";
+      notify(`LinkedIn post generated with ${providerLabel}.`);
+      return payload.post;
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Unable to generate a LinkedIn post.",
+      );
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveLinkedInPost = async (
+    episodeId: string,
+    post: string,
+  ): Promise<string | null> => {
+    setBusy(`linkedin-save:${episodeId}`);
+    try {
+      const payload = await requestJson<{
+        post: string;
+        state: DashboardState;
+      }>(`/api/episodes/${encodeURIComponent(episodeId)}/linkedin-post`, {
+        method: "PATCH",
+        body: JSON.stringify({ post }),
+      });
+      setState(payload.state);
+      notify("LinkedIn post saved.");
+      return payload.post;
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Unable to save the LinkedIn post.",
+      );
+      return null;
+    } finally {
+      setBusy(null);
+    }
   };
 
   const regenerateEpisodeAudio = async (episodeId: string) => {
@@ -780,8 +845,15 @@ export function DashboardClient({
             onSeekTo={(seconds) => seekEpisodeTo(reviewEpisode, seconds)}
             onPlaybackRateChange={changePlaybackRate}
             onEdit={(script) => void editEpisode(reviewEpisode.id, script)}
+            onGenerateLinkedInPost={() =>
+              generateLinkedInPost(reviewEpisode.id)
+            }
+            onSaveLinkedInPost={(post) =>
+              saveLinkedInPost(reviewEpisode.id, post)
+            }
             onRegenerateAudio={() => void regenerateEpisodeAudio(reviewEpisode.id)}
             onExport={() => exportEpisode(reviewEpisode)}
+            onNotify={notify}
             busy={busy}
           />
         )}

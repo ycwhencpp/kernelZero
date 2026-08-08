@@ -33,3 +33,9 @@ export function estimatedGenerationCostUsd(
   if (provider === "gemini") return includeAudio ? 0.12 : 0.04;
   return includeAudio ? 0.16 : 0.06;
 }
+
+export function estimatedAudioCostUsd(provider: AiProvider | null): number {
+  if (provider === "openai") return 0.1;
+  if (provider === "gemini") return 0.08;
+  return 0;
+}

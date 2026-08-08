@@ -4,21 +4,136 @@ import {
   scoreCandidate,
   selectDigestItems,
 } from "../../../../lib/domain";
-import { aiProviderLabel, generatePodcast, resolveAiProvider, estimatedGenerationCostUsd } from "../../../../lib/openai";
+import {
+  aiProviderLabel,
+  estimatedAudioCostUsd,
+  estimatedGenerationCostUsd,
+  generatePodcast,
+  resolveAiProvider,
+  synthesizePodcastAudio,
+} from "../../../../lib/openai";
+import { hasUsableAudioUrl } from "../../../../lib/generated-episode";
 import { discoverResearch } from "../../../../lib/research";
 import { fetchFeed } from "../../../../lib/rss";
 import {
+  acquireJobLease,
   addSource,
   createEpisode,
+  finishJobLease,
   findAuthenticatedOwnerIdByEmail,
   getActiveVoiceProfile,
   getDashboardState,
   personalizeItems,
   recordJob,
+  renewJobLease,
+  replaceEpisodeAudio,
   upsertItems,
 } from "../../../../lib/store";
 
 export const dynamic = "force-dynamic";
+
+const DEFAULT_DAILY_JOB_LEASE_TIMEOUT_MS = 2 * 60 * 60 * 1_000;
+const MIN_DAILY_JOB_LEASE_TIMEOUT_MS = 10 * 60 * 1_000;
+
+function dailyJobLeaseTimeoutMs(): number {
+  const configured = Number(process.env.DAILY_JOB_LEASE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured >= MIN_DAILY_JOB_LEASE_TIMEOUT_MS
+    ? configured
+    : DEFAULT_DAILY_JOB_LEASE_TIMEOUT_MS;
+}
+
+type JobLeaseHeartbeat = {
+  assertOwned: () => Promise<void>;
+  stop: () => Promise<string>;
+};
+
+function startJobLeaseHeartbeat(
+  ownerId: string,
+  jobId: string,
+  initialStartedAt: string,
+  leaseTimeoutMs: number,
+): JobLeaseHeartbeat {
+  let startedAt = initialStartedAt;
+  let stopped = false;
+  let failure: Error | null = null;
+  let pending = Promise.resolve();
+
+  const renew = (): Promise<void> => {
+    const run = pending.then(async () => {
+      if (stopped) return;
+      if (failure) throw failure;
+      const renewedAt = await renewJobLease(ownerId, jobId, startedAt);
+      if (!renewedAt) {
+        throw new Error(
+          "Daily generation stopped because a newer scheduler run took over its lease.",
+        );
+      }
+      startedAt = renewedAt;
+    });
+    pending = run.catch((error) => {
+      failure = error instanceof Error ? error : new Error(String(error));
+    });
+    return run;
+  };
+
+  const interval = setInterval(() => {
+    void renew().catch(() => {
+      // assertOwned/stop surfaces the stored failure at an operation boundary.
+    });
+  }, Math.max(30_000, Math.floor(leaseTimeoutMs / 3)));
+  interval.unref();
+
+  return {
+    assertOwned: renew,
+    stop: async () => {
+      stopped = true;
+      clearInterval(interval);
+      await pending;
+      if (failure) throw failure;
+      return startedAt;
+    },
+  };
+}
+
+function dailyEpisodeId(ownerId: string, dateKey: string): string {
+  const ownerKey = ownerId.replace(/[^a-z0-9_-]/gi, "_");
+  return `episode-daily-${ownerKey}-${dateKey}`;
+}
+
+async function finalizeDailyJob(
+  ownerId: string,
+  jobId: string,
+  provider: string,
+  costUsd: number,
+  leaseStartedAt?: string | null,
+): Promise<void> {
+  try {
+    const job = {
+      id: jobId,
+      stage: "Daily research and digest",
+      status: "completed" as const,
+      provider,
+      costUsd,
+    };
+    if (leaseStartedAt) {
+      const finished = await finishJobLease(ownerId, leaseStartedAt, job);
+      if (!finished) {
+        console.warn(
+          `[cron/daily] ${jobId} did not finalize because a newer worker owns the lease.`,
+        );
+      }
+    } else {
+      await recordJob(ownerId, job);
+    }
+  } catch (jobError) {
+    // Once the checkpoint/audio is durable, bookkeeping must not trigger a
+    // second expensive run. A later cron invocation can reconcile this row.
+    console.error(
+      `[cron/daily] ${jobId} completed, but final job status could not be recorded:`,
+      jobError,
+    );
+  }
+}
 
 export async function GET(request: Request) {
   const authorization = request.headers.get("authorization");
@@ -54,27 +169,47 @@ export async function GET(request: Request) {
   const dateKey = `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
   const jobId = `daily-${dateKey}`;
   const initialState = await getDashboardState(ownerId);
+  const checkpointId = dailyEpisodeId(ownerId, dateKey);
+  let checkpointEpisode = initialState.episodes.find(
+    (episode) => episode.id === checkpointId,
+  );
+  const existingJob = initialState.jobs.find((job) => job.id === jobId);
   if (!initialState.settings.dailyGeneration) {
     return Response.json({ status: "paused", message: "Daily generation is disabled in workspace settings." });
   }
-  if (
-    initialState.jobs.some(
-      (job) => job.id === jobId && job.status === "completed",
-    )
-  ) {
+  const provider = resolveAiProvider();
+  const usesLocalNarrator = Boolean(initialState.voiceProfile);
+  const freshEstimatedCostUsd = estimatedGenerationCostUsd(
+    provider,
+    !usesLocalNarrator,
+  );
+  const attemptEstimatedCostUsd = checkpointEpisode
+    ? usesLocalNarrator
+      ? 0
+      : estimatedAudioCostUsd(provider)
+    : freshEstimatedCostUsd;
+  const configuredNarrator = initialState.voiceProfile
+    ? "Local Chatterbox"
+    : aiProviderLabel(provider);
+  if (checkpointEpisode && hasUsableAudioUrl(checkpointEpisode.audioUrl)) {
+    if (existingJob?.status !== "completed") {
+      await finalizeDailyJob(
+        ownerId,
+        jobId,
+        configuredNarrator,
+        existingJob?.costUsd ?? freshEstimatedCostUsd,
+      );
+    }
     return Response.json({
       status: "already_completed",
-      episode: initialState.episodes.find((episode) =>
-        episode.createdAt.startsWith(dateKey),
-      ),
+      episode: checkpointEpisode,
     });
   }
-  const estimatedCostUsd = estimatedGenerationCostUsd(resolveAiProvider(), true);
   if (
     !hasBudgetForGeneration(
       initialState.stats.dailySpendUsd,
       initialState.stats.dailyBudgetUsd,
-      estimatedCostUsd,
+      attemptEstimatedCostUsd,
     )
   ) {
     return Response.json(
@@ -85,14 +220,61 @@ export async function GET(request: Request) {
     );
   }
 
-  await recordJob(ownerId, {
-    id: jobId,
-    stage: "Daily research and digest",
-    status: "running",
-    provider: "OpenAlex + Semantic Scholar + arXiv + AI",
-  });
-
+  let leaseStartedAt: string | null = null;
+  let leaseCostUsd = attemptEstimatedCostUsd;
+  let leaseHeartbeat: JobLeaseHeartbeat | null = null;
   try {
+    const leaseTimeoutMs = dailyJobLeaseTimeoutMs();
+    const lease = await acquireJobLease(
+      ownerId,
+      {
+        id: jobId,
+        stage: "Daily research and digest",
+        provider: configuredNarrator,
+        costUsd: attemptEstimatedCostUsd,
+      },
+      leaseTimeoutMs,
+    );
+    if (!lease.acquired) {
+      return Response.json({
+        status: "already_running",
+        message: "Daily generation is already running for this workspace.",
+      });
+    }
+    if (!lease.startedAt) {
+      throw new Error("The daily job lease did not return a fencing token.");
+    }
+    leaseStartedAt = lease.startedAt;
+    leaseCostUsd = lease.costUsd;
+    leaseHeartbeat = startJobLeaseHeartbeat(
+      ownerId,
+      jobId,
+      leaseStartedAt,
+      leaseTimeoutMs,
+    );
+    const assertLeaseOwned = async (): Promise<void> => {
+      if (!leaseHeartbeat) {
+        throw new Error("The daily job lease is no longer available.");
+      }
+      await leaseHeartbeat.assertOwned();
+    };
+    const stopLeaseHeartbeat = async (): Promise<string> => {
+      if (!leaseHeartbeat) {
+        throw new Error("The daily job lease is no longer available.");
+      }
+      const heartbeat = leaseHeartbeat;
+      leaseHeartbeat = null;
+      const finalStartedAt = await heartbeat.stop();
+      leaseStartedAt = finalStartedAt;
+      return finalStartedAt;
+    };
+
+    // The pre-lease read is advisory: another worker may have checkpointed or
+    // attached audio while this request waited to acquire the row.
+    const leasedState = await getDashboardState(ownerId);
+    checkpointEpisode = leasedState.episodes.find(
+      (episode) => episode.id === checkpointId,
+    );
     const voiceProfile = await getActiveVoiceProfile(ownerId);
     if (process.env.REQUIRE_LOCAL_VOICE === "true" && !voiceProfile) {
       throw new Error("No active local Chatterbox voice is configured for this cron owner. Save a voice in Settings before running the daily cron.");
@@ -100,14 +282,53 @@ export async function GET(request: Request) {
     if (voiceProfile && process.env.VERCEL) {
       throw new Error("The selected Chatterbox voice is stored on this local KernelZero machine. Run the daily cron locally; a Vercel function cannot read the local reference recording or run Chatterbox.");
     }
-    const discovered: typeof initialState.items = [];
+    if (checkpointEpisode) {
+      let resumedEpisode = checkpointEpisode;
+      if (!hasUsableAudioUrl(checkpointEpisode.audioUrl)) {
+        const speech = await synthesizePodcastAudio(
+          checkpointEpisode.script,
+          provider,
+          voiceProfile,
+          checkpointEpisode.durationSeconds,
+        );
+        await assertLeaseOwned();
+        resumedEpisode = await replaceEpisodeAudio(
+          ownerId,
+          checkpointEpisode,
+          speech.audio,
+          speech.audioContentType,
+          speech.durationSeconds,
+        );
+        await assertLeaseOwned();
+      }
+      const completionToken = await stopLeaseHeartbeat();
+      await finalizeDailyJob(
+        ownerId,
+        jobId,
+        voiceProfile ? "Local Chatterbox" : aiProviderLabel(provider),
+        leaseCostUsd,
+        completionToken,
+      );
+      return Response.json({
+        status: "completed",
+        resumed: true,
+        discovered: 0,
+        warnings: [],
+        episode: resumedEpisode,
+        narration: voiceProfile ? "local_chatterbox" : "system_voice",
+      });
+    }
+    if (!provider) {
+      throw new Error("No AI provider is configured for the daily podcast.");
+    }
+    const discovered: typeof leasedState.items = [];
     const warnings: string[] = [];
-    for (const interest of initialState.interests.filter((entry) => entry.enabled)) {
+    for (const interest of leasedState.interests.filter((entry) => entry.enabled)) {
       const result = await discoverResearch(interest);
       discovered.push(...result.items);
       warnings.push(...result.warnings);
     }
-    for (const source of initialState.sources.filter(
+    for (const source of leasedState.sources.filter(
       (entry) =>
         entry.enabled && (entry.type === "rss" || entry.type === "atom"),
     )) {
@@ -121,7 +342,7 @@ export async function GET(request: Request) {
                 sourceId: source.id,
                 sourceName: source.name,
               },
-              initialState.interests,
+              leasedState.interests,
             ),
           ),
         );
@@ -138,30 +359,41 @@ export async function GET(request: Request) {
       }
     }
     const personalized = await personalizeItems(ownerId, discovered);
-    const unique = deduplicateItems([...initialState.items, ...personalized]);
+    const unique = deduplicateItems([...leasedState.items, ...personalized]);
     await upsertItems(ownerId, unique);
 
     const digestItems = selectDigestItems(unique, 5);
     const generated = await generatePodcast(digestItems, "daily_digest", {
       includeAudio: true,
       voiceProfile,
-      episodeLength: initialState.settings.episodeLength,
+      episodeLength: leasedState.settings.episodeLength,
+      episodeId: checkpointId,
+      onDraftReady: async (checkpoint) => {
+        await assertLeaseOwned();
+        await createEpisode(ownerId, checkpoint.episode, checkpoint.evidence);
+        await assertLeaseOwned();
+      },
     });
-    const episode = await createEpisode(
+    if (!generated.audio || generated.audio.byteLength === 0) {
+      throw new Error("Audio was requested, but the narrator returned no audio data.");
+    }
+    await assertLeaseOwned();
+    const episode = await replaceEpisodeAudio(
       ownerId,
       generated.episode,
-      generated.evidence,
       generated.audio,
-      new URL(request.url).origin,
       generated.audioContentType ?? undefined,
+      generated.episode.durationSeconds,
     );
-    await recordJob(ownerId, {
-      id: jobId,
-      stage: "Daily research and digest",
-      status: "completed",
-      provider: aiProviderLabel(generated.provider),
-      costUsd: estimatedCostUsd,
-    });
+    await assertLeaseOwned();
+    const completionToken = await stopLeaseHeartbeat();
+    await finalizeDailyJob(
+      ownerId,
+      jobId,
+      aiProviderLabel(generated.provider),
+      leaseCostUsd,
+      completionToken,
+    );
 
     return Response.json({
       status: "completed",
@@ -173,13 +405,53 @@ export async function GET(request: Request) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[cron/daily] ${jobId} failed for ${ownerId}:`, error);
-    await recordJob(ownerId, {
-      id: jobId,
-      stage: "Daily research and digest",
-      status: "failed",
-      error: message,
-    });
+    let failureToken = leaseStartedAt;
+    if (leaseHeartbeat) {
+      const heartbeat = leaseHeartbeat;
+      leaseHeartbeat = null;
+      try {
+        failureToken = await heartbeat.stop();
+      } catch (heartbeatError) {
+        failureToken = null;
+        console.warn(
+          `[cron/daily] ${jobId} no longer owns its lease:`,
+          heartbeatError,
+        );
+      }
+    }
+    if (failureToken) {
+      try {
+        const finished = await finishJobLease(ownerId, failureToken, {
+          id: jobId,
+          stage: "Daily research and digest",
+          status: "failed",
+          provider: configuredNarrator,
+          costUsd: leaseCostUsd,
+          error: message,
+        });
+        if (!finished) {
+          console.warn(
+            `[cron/daily] ${jobId} failure was ignored because a newer worker owns the lease.`,
+          );
+        }
+      } catch (jobError) {
+        console.error(`[cron/daily] ${jobId} could not record failure:`, jobError);
+      }
+    }
     return Response.json({ error: message }, { status: 500 });
+  } finally {
+    if (leaseHeartbeat) {
+      const heartbeat = leaseHeartbeat;
+      leaseHeartbeat = null;
+      try {
+        await heartbeat.stop();
+      } catch (heartbeatError) {
+        console.warn(
+          `[cron/daily] ${jobId} could not stop its lease heartbeat cleanly:`,
+          heartbeatError,
+        );
+      }
+    }
   }
 }
 

@@ -3,6 +3,21 @@
 import { useState } from "react";
 import type { AppUser, DashboardState, Episode } from "../../lib/types";
 import { formatDuration } from "../../lib/domain";
+import { PLAYBACK_RATE_OPTIONS } from "../../lib/playback";
+import {
+  linkedInPostEditorDraft,
+  resolveLinkedInPostEditorValue,
+} from "../../lib/linkedin-post-editor";
+import {
+  appendLinkedInPostSource,
+  containsLinkedInPostSourceReference,
+  LINKEDIN_POST_MAX_CHARACTERS,
+  linkedInPostCharacterCount,
+  primaryLinkedInPostSource,
+  replaceLinkedInPostContent,
+  resolveLinkedInSourceCta,
+  splitLinkedInPostSource,
+} from "../../lib/linkedin-post-format";
 
 function titleCase(value: string): string {
   return value.replaceAll("_", " ").replace(/\b\w/g, (l) => l.toUpperCase());
@@ -25,8 +40,11 @@ export function OrganicReviewView({
   onSeekTo,
   onPlaybackRateChange,
   onEdit,
+  onGenerateLinkedInPost,
+  onSaveLinkedInPost,
   onRegenerateAudio,
   onExport,
+  onNotify,
   busy,
   canEdit,
   canPublish,
@@ -48,8 +66,11 @@ export function OrganicReviewView({
   onSeekTo: (seconds: number) => void;
   onPlaybackRateChange: (rate: number) => void;
   onEdit: (script: string) => void;
+  onGenerateLinkedInPost: () => Promise<string | null>;
+  onSaveLinkedInPost: (post: string) => Promise<string | null>;
   onRegenerateAudio: () => void;
   onExport: () => void;
+  onNotify: (message: string) => void;
   busy: string | null;
   canEdit: boolean;
   canPublish: boolean;
@@ -58,6 +79,41 @@ export function OrganicReviewView({
   const evidence = state.evidence.filter((claim) => claim.episodeId === episode.id);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(episode.script);
+  const persistedLinkedInPost = episode.linkedInPost ?? null;
+  const [linkedInDraft, setLinkedInDraft] = useState(() =>
+    linkedInPostEditorDraft(episode.id, persistedLinkedInPost),
+  );
+  const storedLinkedInPost = resolveLinkedInPostEditorValue(
+    linkedInDraft,
+    episode.id,
+    persistedLinkedInPost,
+  );
+  const storedLinkedInParts = storedLinkedInPost
+    ? splitLinkedInPostSource(storedLinkedInPost)
+    : { content: "", sourceCta: null, sourceFooter: null };
+  const linkedInSource = primaryLinkedInPostSource(episode, state.items);
+  const linkedInSourceCta = resolveLinkedInSourceCta(
+    storedLinkedInPost,
+    storedLinkedInParts.content.trim() || episode.title,
+  );
+  const linkedInPost =
+    storedLinkedInPost?.trim() &&
+    storedLinkedInParts.content.trim() &&
+    linkedInSource
+      ? appendLinkedInPostSource(
+          storedLinkedInParts.content,
+          linkedInSource,
+          linkedInSourceCta,
+        )
+      : storedLinkedInPost;
+  const updateLinkedInPost = (value: string | null) => {
+    setLinkedInDraft(
+      linkedInPostEditorDraft(episode.id, persistedLinkedInPost, value),
+    );
+  };
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">(
+    "idle",
+  );
   const paragraphs = episode.script.split(/\n{2,}/).filter(Boolean);
   const hasAudio = Boolean(episode.audioUrl);
   const audioReady = hasAudio && audioStatus === "ready";
@@ -89,6 +145,76 @@ export function OrganicReviewView({
     canEdit &&
     (episode.status === "needs_approval" || episode.status === "draft");
   const canApprove = canPublish && episode.status === "needs_approval";
+  const linkedInBusy = busy === `linkedin:${episode.id}`;
+  const linkedInSaving = busy === `linkedin-save:${episode.id}`;
+  const linkedInDirty =
+    linkedInPost !== null && linkedInPost !== persistedLinkedInPost;
+  const linkedInCharacterCount = linkedInPost
+    ? linkedInPostCharacterCount(linkedInPost)
+    : 0;
+  const linkedInParts = linkedInPost
+    ? splitLinkedInPostSource(linkedInPost)
+    : { content: "", sourceCta: null, sourceFooter: null };
+  const linkedInHasContent = Boolean(linkedInParts.content.trim());
+  const linkedInHasSource = linkedInParts.sourceFooter !== null;
+  const linkedInHasExtraSource = containsLinkedInPostSourceReference(
+    linkedInParts.content,
+  );
+  const linkedInTooLong =
+    linkedInCharacterCount > LINKEDIN_POST_MAX_CHARACTERS;
+  const generateLinkedInPost = async () => {
+    const post = await onGenerateLinkedInPost();
+    if (post !== null) {
+      updateLinkedInPost(post);
+      setCopyStatus("idle");
+    }
+  };
+  const saveLinkedInPost = async () => {
+    if (!linkedInPost?.trim() || !linkedInHasContent) return;
+    const savedPost = await onSaveLinkedInPost(linkedInPost);
+    if (savedPost !== null) {
+      updateLinkedInPost(savedPost);
+    }
+  };
+  const copyLinkedInPost = async () => {
+    if (!linkedInPost) return;
+
+    try {
+      if (
+        typeof navigator !== "undefined" &&
+        typeof navigator.clipboard?.writeText === "function"
+      ) {
+        await navigator.clipboard.writeText(linkedInPost);
+      } else {
+        const copyTarget = document.createElement("textarea");
+        copyTarget.value = linkedInPost;
+        copyTarget.setAttribute("readonly", "");
+        copyTarget.setAttribute("aria-hidden", "true");
+        copyTarget.setAttribute("tabindex", "-1");
+        copyTarget.style.position = "fixed";
+        copyTarget.style.top = "0";
+        copyTarget.style.opacity = "0";
+        copyTarget.style.pointerEvents = "none";
+        document.body.appendChild(copyTarget);
+        let copied = false;
+        try {
+          copyTarget.focus();
+          copyTarget.select();
+          copyTarget.setSelectionRange(0, copyTarget.value.length);
+          copied = document.execCommand("copy");
+        } finally {
+          copyTarget.remove();
+        }
+        if (!copied) throw new Error("Copy command was unavailable.");
+      }
+      setCopyStatus("copied");
+      onNotify("LinkedIn post copied to your clipboard.");
+      window.setTimeout(() => setCopyStatus("idle"), 2400);
+    } catch {
+      setCopyStatus("failed");
+      onNotify("Unable to copy automatically. Select the post and copy it manually.");
+    }
+  };
   const revealChapter = (seconds: number) => {
     if (audioReady) onSeekTo(seconds);
     const chapterIndex = chapters.reduce(
@@ -155,6 +281,17 @@ export function OrganicReviewView({
                 ? "Regenerate Audio"
                 : "Generate Audio"}
           </button>
+          {canEdit && (
+            <button
+              type="button"
+              className="organic-btn organic-btn-dark"
+              disabled={busy !== null}
+              aria-busy={linkedInBusy}
+              onClick={() => void generateLinkedInPost()}
+            >
+              {linkedInBusy ? "Generating LinkedIn Post…" : "Generate LinkedIn Post"}
+            </button>
+          )}
           {canApprove ? (
             <button
               type="button"
@@ -183,6 +320,127 @@ export function OrganicReviewView({
           )}
         </div>
       </div>
+
+      {linkedInPost !== null && (
+        <section
+          className="organic-linkedin-post"
+          aria-labelledby="linkedin-post-title"
+        >
+          <div className="organic-linkedin-post-head">
+            <div>
+              <p className="organic-kicker lime">SOCIAL DRAFT</p>
+              <h2 id="linkedin-post-title">Your LinkedIn post</h2>
+              <p>
+                Refine the generated copy, then paste it into LinkedIn when it
+                is ready.
+              </p>
+            </div>
+            <span className="organic-linkedin-mark" aria-hidden="true">
+              in
+            </span>
+          </div>
+          <label className="organic-linkedin-editor" htmlFor="linkedin-post-copy">
+            <span>Edit post</span>
+            <textarea
+              id="linkedin-post-copy"
+              value={storedLinkedInParts.content}
+              readOnly={!canEdit || busy !== null}
+              aria-busy={linkedInBusy || linkedInSaving}
+              onChange={(event) => {
+                updateLinkedInPost(
+                  replaceLinkedInPostContent(
+                    linkedInPost,
+                    event.target.value,
+                  ),
+                );
+                setCopyStatus("idle");
+              }}
+              rows={10}
+            />
+          </label>
+          {linkedInParts.sourceFooter && (
+            <div className="organic-linkedin-source" aria-label="Source footer">
+              <span>Included when copied</span>
+              <p>{linkedInParts.sourceFooter}</p>
+            </div>
+          )}
+          <div className="organic-linkedin-post-footer">
+            <span className="organic-linkedin-count">
+              {linkedInCharacterCount.toLocaleString()} /{" "}
+              {LINKEDIN_POST_MAX_CHARACTERS.toLocaleString()} characters
+              {linkedInHasSource ? " (source excluded)" : ""}
+            </span>
+            <span
+              className={`organic-linkedin-copy-status ${
+                copyStatus === "failed" ||
+                !linkedInHasSource ||
+                linkedInHasExtraSource ||
+                linkedInTooLong
+                  ? "is-error"
+                  : ""
+              }`}
+              role="status"
+              aria-live="polite"
+            >
+              {copyStatus === "copied"
+                ? "Copied to clipboard"
+                : copyStatus === "failed"
+                  ? "Select the text and copy manually"
+                  : linkedInHasExtraSource
+                    ? "Source links are added automatically"
+                    : !linkedInHasSource
+                      ? "A valid episode source is required"
+                      : linkedInTooLong
+                        ? "Shorten the post copy before saving"
+                        : ""}
+            </span>
+            <div className="organic-linkedin-post-actions">
+              {canEdit && (
+                <>
+                  <button
+                    type="button"
+                    className="organic-btn organic-btn-outline compact"
+                    disabled={busy !== null}
+                    aria-busy={linkedInBusy}
+                    onClick={() => void generateLinkedInPost()}
+                  >
+                    {linkedInBusy ? "Regenerating…" : "Regenerate"}
+                  </button>
+                  <button
+                    type="button"
+                    className="organic-btn organic-btn-outline compact"
+                    disabled={
+                      busy !== null ||
+                      !linkedInDirty ||
+                      !linkedInHasContent ||
+                      !linkedInHasSource ||
+                      linkedInHasExtraSource ||
+                      linkedInTooLong
+                    }
+                    aria-busy={linkedInSaving}
+                    onClick={() => void saveLinkedInPost()}
+                  >
+                    {linkedInSaving ? "Saving…" : "Save changes"}
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                className="organic-btn organic-btn-lime compact"
+                disabled={
+                  !linkedInHasContent ||
+                  !linkedInHasSource ||
+                  linkedInHasExtraSource ||
+                  linkedInTooLong
+                }
+                onClick={() => void copyLinkedInPost()}
+              >
+                {copyStatus === "copied" ? "Copied" : "Copy post"}
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
 
       <div className="organic-review-grid">
         <article className="organic-panel transcript">
@@ -285,11 +543,11 @@ export function OrganicReviewView({
                     onPlaybackRateChange(Number(event.target.value))
                   }
                 >
-                  <option value={0.75}>0.75x</option>
-                  <option value={1}>1x</option>
-                  <option value={1.25}>1.25x</option>
-                  <option value={1.5}>1.5x</option>
-                  <option value={2}>2x</option>
+                  {PLAYBACK_RATE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
                 </select>
               </>
             ) : (

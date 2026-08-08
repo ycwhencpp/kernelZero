@@ -22,6 +22,8 @@ const execFileAsync = promisify(execFile);
 type ChatterboxRequest = {
   segments: ChatterboxNarrationSegment[];
   samplePath: string;
+  checkpointDir: string;
+  retryEpoch: number;
   device: string;
   deliveryPrompt: string;
   targetWordsPerMinute: number;
@@ -60,6 +62,33 @@ function logChatterboxDiagnostics(output: unknown): void {
   }
 }
 
+function chatterboxWorkerFailureDetail(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = typeof error.stderr === "string" ? error.stderr : "";
+    const workerError = stderr
+      .split(/[\r\n]+/)
+      .map((line) => line.trim())
+      .reverse()
+      .find((line) => /^(?:ValueError|RuntimeError):\s+/.test(line));
+    if (workerError) {
+      return workerError.replace(/^(?:ValueError|RuntimeError):\s+/, "");
+    }
+    return "The local Chatterbox worker exited before completing narration.";
+  }
+  if (error instanceof Error && !/[\r\n]/.test(error.message)) {
+    return error.message;
+  }
+  return "The local Chatterbox worker failed.";
+}
+
+function canResumeChatterboxWorker(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("stderr" in error)) {
+    return false;
+  }
+  const stderr = typeof error.stderr === "string" ? error.stderr : "";
+  return /Chatterbox could not produce clear audio for chunk \d+/i.test(stderr);
+}
+
 export async function assertChatterboxAvailable(): Promise<void> {
   try {
     await access(pythonCommand());
@@ -92,6 +121,8 @@ export async function synthesizeChatterboxSpeechWithMetadata(
     // noise, while their explicit pauses preserve the host's natural beats.
     segments: prepareChatterboxSegments(script, 260),
     samplePath: resolveVoiceSample(sampleKey),
+    checkpointDir: join(workDir, "segments"),
+    retryEpoch: 0,
     device: chatterboxDevice(),
     // Turbo has no natural-language instruction channel. Keep the requested
     // contract in the worker request and compile its supported behavior into
@@ -111,22 +142,46 @@ export async function synthesizeChatterboxSpeechWithMetadata(
   }
 
   try {
-    await writeFile(requestPath, JSON.stringify(request), "utf8");
     const cacheDirectory = chatterboxCacheDirectory();
-    const { stderr: workerStderr } = await execFileAsync(
-      pythonCommand(),
-      [workerPath, requestPath, wavPath],
-      {
-        env: {
-          ...process.env,
-          ...(cacheDirectory ? { HF_HOME: cacheDirectory } : {}),
-        },
-        maxBuffer: 1024 * 1024,
-        timeout: Number(process.env.CHATTERBOX_TIMEOUT_MS || 30 * 60_000),
-      },
-    );
-    logChatterboxDiagnostics(workerStderr);
+    let workerCompleted = false;
+    for (let retryEpoch = 0; retryEpoch < 2; retryEpoch += 1) {
+      request.retryEpoch = retryEpoch;
+      await writeFile(requestPath, JSON.stringify(request), "utf8");
+      try {
+        const { stderr: workerStderr } = await execFileAsync(
+          pythonCommand(),
+          [workerPath, requestPath, wavPath],
+          {
+            env: {
+              ...process.env,
+              ...(cacheDirectory ? { HF_HOME: cacheDirectory } : {}),
+            },
+            maxBuffer: 1024 * 1024,
+            timeout: Number(process.env.CHATTERBOX_TIMEOUT_MS || 30 * 60_000),
+          },
+        );
+        logChatterboxDiagnostics(workerStderr);
+        workerCompleted = true;
+        break;
+      } catch (workerError) {
+        if (workerError && typeof workerError === "object" && "stderr" in workerError) {
+          logChatterboxDiagnostics(workerError.stderr);
+        }
+        if (retryEpoch === 0 && canResumeChatterboxWorker(workerError)) {
+          console.warn(
+            "[chatterbox] retrying the unfinished segment with preserved chunk checkpoints",
+          );
+          continue;
+        }
+        throw workerError;
+      }
+    }
+    if (!workerCompleted) {
+      throw new Error("The local Chatterbox worker did not complete narration.");
+    }
     let tempoFilter: string[] = [];
+    // This is bounded mastering correction only. Listener-selected playback
+    // rates are always applied by players and never baked into the stored MP3.
     const promptedDurationSeconds =
       chatterboxTargetDurationSeconds(script) ?? targetDurationSeconds;
     if (promptedDurationSeconds && promptedDurationSeconds > 0) {
@@ -171,7 +226,7 @@ export async function synthesizeChatterboxSpeechWithMetadata(
     if (error && typeof error === "object" && "stderr" in error) {
       logChatterboxDiagnostics(error.stderr);
     }
-    const detail = error instanceof Error ? error.message : String(error);
+    const detail = chatterboxWorkerFailureDetail(error);
     throw new Error(`Chatterbox voice generation failed: ${detail}`);
   } finally {
     await rm(workDir, { recursive: true, force: true });

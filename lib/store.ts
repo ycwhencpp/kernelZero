@@ -2,18 +2,25 @@ import { buildTechRadar } from "./domain";
 import { mediaUrl } from "./media-path";
 import { normalizeEpisodeLength } from "./podcast-length";
 import { normalizeEvidenceConfidence } from "./podcast-schema";
+import { loadAllPaginatedRows } from "./supabase-pagination";
 import { getSupabase, MEDIA_BUCKET } from "./supabase";
 import type { Collection, ContentItem, DashboardState, Episode, EvidenceClaim, InterestProfile, JobRun, Source, VoiceProfile, WorkspaceSettings } from "./types";
 
 // Supabase rows are intentionally schema-flexible at this server boundary.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
+export class EpisodeNotFoundError extends Error {
+  constructor(message = "Episode not found.") {
+    super(message);
+    this.name = "EpisodeNotFoundError";
+  }
+}
 const iso = (value: unknown) => value ? new Date(String(value)).toISOString() : null;
 const array = <T>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
 function mapInterest(row: Row): InterestProfile { return { id: row.id, name: row.name, query: row.query, keywords: array(row.keywords_json), exclusions: array(row.exclusions_json), preferredSources: array(row.preferred_sources_json), freshnessDays: row.freshness_days, weight: Number(row.weight), enabled: Boolean(row.enabled) }; }
 function mapSource(row: Row): Source { return { id: row.id, name: row.name, type: row.type, url: row.url, trustLevel: row.trust_level, rightsMode: row.rights_mode, enabled: Boolean(row.enabled), lastSuccessfulFetch: iso(row.last_successful_fetch) }; }
 function mapItem(row: Row): ContentItem { return { id: row.id, kind: row.kind, title: row.title, summary: row.summary, authors: array(row.authors_json), sourceName: row.source_name, sourceId: row.source_id ?? undefined, canonicalUrl: row.canonical_url, doi: row.doi ?? undefined, arxivId: row.arxiv_id ?? undefined, publishedAt: iso(row.published_at)!, accessLevel: row.access_level, peerReviewState: row.peer_review_state, topics: array(row.topics_json), score: Number(row.score), trend: row.trend, citationCount: Number(row.citation_count), readingMinutes: Number(row.reading_minutes), saved: Boolean(row.saved), listened: Boolean(row.listened), processingState: row.processing_state }; }
-function mapEpisode(row: Row): Episode { const audioKey = typeof row.audio_key === "string" ? row.audio_key : null; return { id: row.id, contentItemId: row.content_item_id ?? undefined, type: row.type, title: row.title, dek: row.dek, script: row.script, showNotes: row.show_notes, transcript: row.transcript, citations: array(row.citations_json), chapters: array(row.chapters_json), audioUrl: audioKey ? mediaUrl(audioKey) : row.audio_url, audioKey, audioBytes: row.audio_bytes, durationSeconds: Number(row.duration_seconds), status: row.status, publishedAt: iso(row.published_at), immutableGuid: row.immutable_guid, generation: Number(row.generation), createdAt: iso(row.created_at)! }; }
+function mapEpisode(row: Row): Episode { const audioKey = typeof row.audio_key === "string" ? row.audio_key : null; return { id: row.id, contentItemId: row.content_item_id ?? undefined, type: row.type, title: row.title, dek: row.dek, script: row.script, showNotes: row.show_notes, transcript: row.transcript, linkedInPost: typeof row.linkedin_post === "string" ? row.linkedin_post : null, citations: array(row.citations_json), chapters: array(row.chapters_json), audioUrl: audioKey ? mediaUrl(audioKey) : row.audio_url, audioKey, audioBytes: row.audio_bytes, durationSeconds: Number(row.duration_seconds), status: row.status, publishedAt: iso(row.published_at), immutableGuid: row.immutable_guid, generation: Number(row.generation), createdAt: iso(row.created_at)! }; }
 function mapEvidence(row: Row): EvidenceClaim { return { id: row.id, episodeId: row.episode_id, contentItemId: row.content_item_id, claim: row.claim, support: row.support, sourceUrl: row.source_url, confidence: normalizeEvidenceConfidence(row.confidence), location: row.location }; }
 function mapVoiceProfile(row: Row): VoiceProfile { return { id: row.id, name: row.display_name, provider: "chatterbox", active: Boolean(row.active), createdAt: iso(row.created_at)! }; }
 function workspaceSettings(row: Row | null | undefined): WorkspaceSettings { return { dailyGeneration: row?.daily_generation_enabled ?? true, episodeLength: normalizeEpisodeLength(row?.episode_length), publishTime: typeof row?.publish_time === "string" && /^\d{2}:\d{2}$/.test(row.publish_time) ? row.publish_time : "08:00" }; }
@@ -23,7 +30,7 @@ function itemRow(ownerId: string, value: ContentItem): Row { return { id: value.
 export function storedDurationSeconds(value: number): number {
   return Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
 }
-function episodeRow(ownerId: string, value: Episode): Row { return { id: value.id, owner_id: ownerId, content_item_id: value.contentItemId ?? null, type: value.type, title: value.title, dek: value.dek, script: value.script, show_notes: value.showNotes, transcript: value.transcript, citations_json: value.citations, citation_count: value.citations.length, chapters_json: value.chapters, audio_url: value.audioUrl, audio_key: value.audioKey ?? null, audio_bytes: value.audioBytes ?? null, duration_seconds: storedDurationSeconds(value.durationSeconds), status: value.status, published_at: value.publishedAt, immutable_guid: value.immutableGuid, generation: value.generation, created_at: value.createdAt, updated_at: new Date().toISOString() }; }
+function episodeRow(ownerId: string, value: Episode): Row { return { id: value.id, owner_id: ownerId, content_item_id: value.contentItemId ?? null, type: value.type, title: value.title, dek: value.dek, script: value.script, show_notes: value.showNotes, transcript: value.transcript, linkedin_post: value.linkedInPost ?? null, citations_json: value.citations, citation_count: value.citations.length, chapters_json: value.chapters, audio_url: value.audioUrl, audio_key: value.audioKey ?? null, audio_bytes: value.audioBytes ?? null, duration_seconds: storedDurationSeconds(value.durationSeconds), status: value.status, published_at: value.publishedAt, immutable_guid: value.immutableGuid, generation: value.generation, created_at: value.createdAt, updated_at: new Date().toISOString() }; }
 
 async function requireDb() { return getSupabase(); }
 export async function findAuthenticatedOwnerIdByEmail(
@@ -59,7 +66,7 @@ function emptyState(): DashboardState {
 export async function getDashboardState(ownerId: string): Promise<DashboardState> {
   const db = await requireDb(); if (!db) return emptyState(); await ensureOwner(ownerId);
   const [interests, sources, items, collections, episodes, jobs, profile, voiceProfiles] = await Promise.all([
-    db.from("interest_profiles").select().eq("owner_id", ownerId).order("weight", { ascending: false }), db.from("sources").select().eq("owner_id", ownerId).order("name"), db.from("content_items").select().eq("owner_id", ownerId).order("score", { ascending: false }).order("published_at", { ascending: false }), db.from("collections").select().eq("owner_id", ownerId), db.from("episodes").select().eq("owner_id", ownerId).order("created_at", { ascending: false }), db.from("job_runs").select().eq("owner_id", ownerId).order("started_at", { ascending: false }).limit(20), db.from("profiles").select().eq("id", ownerId).single(), db.from("voice_profiles").select().eq("owner_id", ownerId).order("created_at", { ascending: false }),
+    db.from("interest_profiles").select().eq("owner_id", ownerId).order("weight", { ascending: false }), db.from("sources").select().eq("owner_id", ownerId).order("name"), loadAllPaginatedRows<Row>((from, to) => db.from("content_items").select().eq("owner_id", ownerId).order("score", { ascending: false }).order("published_at", { ascending: false }).order("id").range(from, to)), db.from("collections").select().eq("owner_id", ownerId), db.from("episodes").select().eq("owner_id", ownerId).order("created_at", { ascending: false }), db.from("job_runs").select().eq("owner_id", ownerId).order("started_at", { ascending: false }).limit(20), db.from("profiles").select().eq("id", ownerId).single(), db.from("voice_profiles").select().eq("owner_id", ownerId).order("created_at", { ascending: false }),
   ]);
   if (interests.error || sources.error || items.error || episodes.error) throw new Error(interests.error?.message || sources.error?.message || items.error?.message || episodes.error?.message || "Unable to load Supabase state.");
   const mappedItems = (items.data ?? []).map(mapItem); const mappedEpisodes = (episodes.data ?? []).map(mapEpisode);
@@ -244,7 +251,7 @@ export async function replaceEpisodeAudio(
     throw new Error(`Unable to store regenerated audio: ${uploadError.message}`);
   }
   const nextAudioUrl = mediaUrl(key);
-  const { error } = await db
+  const { data: updatedEpisode, error } = await db
     .from("episodes")
     .update({
       audio_key: key,
@@ -255,10 +262,33 @@ export async function replaceEpisodeAudio(
       updated_at: new Date().toISOString(),
     })
     .eq("id", episode.id)
-    .eq("owner_id", ownerId);
-  if (error) throw new Error(error.message);
+    .eq("owner_id", ownerId)
+    .select("id")
+    .maybeSingle();
+  if (error || !updatedEpisode) {
+    const { error: cleanupError } = await db.storage
+      .from(MEDIA_BUCKET)
+      .remove([key]);
+    if (cleanupError) {
+      console.error(
+        `[storage] cleanup failed bucket=${MEDIA_BUCKET} key=${key}`,
+        cleanupError,
+      );
+    }
+    throw new Error(
+      error?.message ?? "Episode not found while storing regenerated audio.",
+    );
+  }
   if (episode.audioKey) {
-    await db.storage.from(MEDIA_BUCKET).remove([episode.audioKey]);
+    const { error: cleanupError } = await db.storage
+      .from(MEDIA_BUCKET)
+      .remove([episode.audioKey]);
+    if (cleanupError) {
+      console.error(
+        `[storage] previous audio cleanup failed bucket=${MEDIA_BUCKET} key=${episode.audioKey}`,
+        cleanupError,
+      );
+    }
   }
   return {
     ...episode,
@@ -270,15 +300,38 @@ export async function replaceEpisodeAudio(
   };
 }
 export async function approveEpisode(ownerId: string, episodeId: string) { const db = await requireDb(); if (!db) return; const { data } = await db.from("episodes").select("audio_key, audio_url, published_at").eq("id", episodeId).eq("owner_id", ownerId).single(); if (!data) return; const hasAudio = Boolean(data.audio_key || data.audio_url); await db.from("episodes").update({ status: hasAudio ? "published" : "approved", published_at: hasAudio ? (data.published_at ?? new Date().toISOString()) : null, updated_at: new Date().toISOString() }).eq("id", episodeId).eq("owner_id", ownerId); }
-export async function updateEpisode(ownerId: string, episodeId: string, patch: Pick<Partial<Episode>, "script" | "transcript" | "showNotes">) {
+export async function updateEpisode(ownerId: string, episodeId: string, patch: Pick<Partial<Episode>, "script" | "transcript" | "showNotes" | "linkedInPost">) {
   const db = await requireDb();
   if (!db) return;
   const updates: Row = { updated_at: new Date().toISOString() };
   if (typeof patch.script === "string") updates.script = patch.script;
   if (typeof patch.transcript === "string") updates.transcript = patch.transcript;
   if (typeof patch.showNotes === "string") updates.show_notes = patch.showNotes;
+  if (typeof patch.linkedInPost === "string" || patch.linkedInPost === null) updates.linkedin_post = patch.linkedInPost;
   const { error } = await db.from("episodes").update(updates).eq("id", episodeId).eq("owner_id", ownerId);
   if (error) throw new Error(error.message);
+}
+export async function saveLinkedInPost(ownerId: string, episodeId: string, post: string): Promise<Episode> {
+  const db = await requireDb();
+  if (!db) throw new Error("Supabase is not configured. A LinkedIn post needs durable workspace storage.");
+  const { data, error } = await db
+    .from("episodes")
+    .update({ linkedin_post: post, updated_at: new Date().toISOString() })
+    .eq("id", episodeId)
+    .eq("owner_id", ownerId)
+    .select()
+    .maybeSingle();
+  if (error) {
+    const migrationHint =
+      error.code === "PGRST204" || /linkedin_post/i.test(error.message)
+        ? " Run the latest Supabase migration first."
+        : "";
+    throw new Error(
+      `Unable to save the LinkedIn post.${migrationHint} ${error.message}`,
+    );
+  }
+  if (!data) throw new EpisodeNotFoundError();
+  return mapEpisode(data);
 }
 export async function deleteWorkspace(ownerId: string): Promise<string[]> {
   const db = await requireDb();
@@ -336,4 +389,182 @@ export async function getPublicEpisodes() { const db = await requireDb(); if (!d
 export async function getPublicEpisode(id: string) { const db = await requireDb(); if (!db) return null; const { data } = await db.from("episodes").select().eq("id", id).eq("status", "published").maybeSingle(); return data ? mapEpisode(data) : null; }
 export async function getMediaEpisodeAccess(key: string): Promise<{ ownerId: string; status: Episode["status"] } | null> { const db = await requireDb(); if (!db) return null; const { data, error } = await db.from("episodes").select("owner_id, status").eq("audio_key", key).limit(1).maybeSingle(); if (error) throw new Error(error.message); return data ? { ownerId: data.owner_id, status: data.status } : null; }
 export async function getSignedMediaUrl(key: string, expiresInSeconds = 60) { const db = await requireDb(); if (!db) return null; const { data, error } = await db.storage.from(MEDIA_BUCKET).createSignedUrl(key, expiresInSeconds); if (error || !data?.signedUrl) return null; return data.signedUrl; }
-export async function recordJob(ownerId: string, job: { id: string; stage: string; status: JobRun["status"]; provider?: string; costUsd?: number; error?: string }) { const db = await requireDb(); if (db) await db.from("job_runs").upsert({ id: job.id, owner_id: ownerId, stage: job.stage, status: job.status, provider: job.provider ?? null, cost_usd: job.costUsd ?? 0, error: job.error ?? null, idempotency_key: job.id, completed_at: job.status === "completed" || job.status === "failed" ? new Date().toISOString() : null }, { onConflict: "owner_id,id" }); }
+export type JobLeaseResult = {
+  acquired: boolean;
+  status: JobRun["status"] | null;
+  startedAt: string | null;
+  costUsd: number;
+};
+
+/**
+ * Atomically starts a job, or takes over an existing terminal/stale run.
+ * The compare-and-swap on started_at ensures only one stale-job contender wins.
+ */
+export async function acquireJobLease(
+  ownerId: string,
+  job: { id: string; stage: string; provider?: string; costUsd?: number },
+  staleAfterMs: number,
+): Promise<JobLeaseResult> {
+  const db = await requireDb();
+  if (!db) {
+    return {
+      acquired: true,
+      status: "running",
+      startedAt: new Date().toISOString(),
+      costUsd: job.costUsd ?? 0,
+    };
+  }
+
+  const startedAt = new Date().toISOString();
+  const row = {
+    id: job.id,
+    owner_id: ownerId,
+    stage: job.stage,
+    status: "running" as const,
+    attempts: 1,
+    provider: job.provider ?? null,
+    cost_usd: job.costUsd ?? 0,
+    error: null,
+    idempotency_key: job.id,
+    started_at: startedAt,
+    completed_at: null,
+  };
+  const inserted = await db
+    .from("job_runs")
+    .insert(row)
+    .select("id")
+    .maybeSingle();
+  if (!inserted.error && inserted.data) {
+    return {
+      acquired: true,
+      status: "running",
+      startedAt,
+      costUsd: job.costUsd ?? 0,
+    };
+  }
+
+  const existing = await db
+    .from("job_runs")
+    .select("status, started_at, attempts, cost_usd")
+    .eq("owner_id", ownerId)
+    .eq("id", job.id)
+    .maybeSingle();
+  if (existing.error || !existing.data) {
+    throw new Error(
+      `Unable to acquire job lease: ${existing.error?.message ?? inserted.error?.message ?? "job row was not found"}`,
+    );
+  }
+
+  const existingStatus = existing.data.status as JobRun["status"];
+  const existingStartedAt = String(existing.data.started_at);
+  const existingCostUsd = Number(existing.data.cost_usd) || 0;
+  const leaseAgeMs = Date.now() - new Date(existingStartedAt).getTime();
+  if (
+    existingStatus === "running" &&
+    Number.isFinite(leaseAgeMs) &&
+    leaseAgeMs < staleAfterMs
+  ) {
+    return {
+      acquired: false,
+      status: existingStatus,
+      startedAt: null,
+      costUsd: existingCostUsd,
+    };
+  }
+
+  const claimedCostUsd = existingCostUsd + (job.costUsd ?? 0);
+
+  const claimed = await db
+    .from("job_runs")
+    .update({
+      ...row,
+      attempts: Math.max(1, Number(existing.data.attempts) || 1) + 1,
+      cost_usd: claimedCostUsd,
+    })
+    .eq("owner_id", ownerId)
+    .eq("id", job.id)
+    .eq("status", existingStatus)
+    .eq("started_at", existingStartedAt)
+    .select("id")
+    .maybeSingle();
+  if (claimed.error) {
+    throw new Error(`Unable to acquire job lease: ${claimed.error.message}`);
+  }
+  return {
+    acquired: Boolean(claimed.data),
+    status: existingStatus,
+    startedAt: claimed.data ? startedAt : null,
+    costUsd: claimed.data ? claimedCostUsd : existingCostUsd,
+  };
+}
+
+/** Renews a running lease and returns its next fencing token. */
+export async function renewJobLease(
+  ownerId: string,
+  jobId: string,
+  startedAt: string,
+): Promise<string | null> {
+  const previousTime = new Date(startedAt).getTime();
+  const renewedAt = new Date(
+    Math.max(Date.now(), Number.isFinite(previousTime) ? previousTime + 1 : 0),
+  ).toISOString();
+  const db = await requireDb();
+  if (!db) return renewedAt;
+  const renewed = await db
+    .from("job_runs")
+    .update({ started_at: renewedAt })
+    .eq("owner_id", ownerId)
+    .eq("id", jobId)
+    .eq("status", "running")
+    .eq("started_at", startedAt)
+    .select("id")
+    .maybeSingle();
+  if (renewed.error) {
+    throw new Error(`Unable to renew job lease: ${renewed.error.message}`);
+  }
+  return renewed.data ? renewedAt : null;
+}
+
+/** Records a terminal result only when the caller still owns the lease. */
+export async function finishJobLease(
+  ownerId: string,
+  startedAt: string,
+  job: {
+    id: string;
+    stage: string;
+    status: "completed" | "failed";
+    provider?: string;
+    costUsd?: number;
+    error?: string;
+  },
+): Promise<boolean> {
+  const db = await requireDb();
+  if (!db) return true;
+  const finished = await db
+    .from("job_runs")
+    .update({
+      stage: job.stage,
+      status: job.status,
+      provider: job.provider ?? null,
+      cost_usd: job.costUsd ?? 0,
+      error: job.error ?? null,
+      completed_at: new Date().toISOString(),
+    })
+    .eq("owner_id", ownerId)
+    .eq("id", job.id)
+    .eq("status", "running")
+    .eq("started_at", startedAt)
+    .select("id")
+    .maybeSingle();
+  if (finished.error) {
+    throw new Error(`Unable to finish job lease: ${finished.error.message}`);
+  }
+  return Boolean(finished.data);
+}
+
+export async function recordJob(ownerId: string, job: { id: string; stage: string; status: JobRun["status"]; provider?: string; costUsd?: number; error?: string }) {
+  const db = await requireDb();
+  if (!db) return;
+  const { error } = await db.from("job_runs").upsert({ id: job.id, owner_id: ownerId, stage: job.stage, status: job.status, provider: job.provider ?? null, cost_usd: job.costUsd ?? 0, error: job.error ?? null, idempotency_key: job.id, completed_at: job.status === "completed" || job.status === "failed" ? new Date().toISOString() : null }, { onConflict: "owner_id,id" });
+  if (error) throw new Error(`Unable to record job status: ${error.message}`);
+}

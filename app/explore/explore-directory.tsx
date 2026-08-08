@@ -6,6 +6,7 @@ import type {
   PlatformCreator,
   PlatformEpisode,
 } from "../../lib/platform-directory";
+import { PlaybackAudio } from "../components/organic/playback-audio";
 
 function formatEpisodeDuration(seconds: number): string {
   const minutes = Math.floor(Math.max(0, seconds) / 60);
@@ -147,14 +148,7 @@ export function ExploreDirectory({
                 </span>
               </div>
 
-              <audio
-                className="platform-audio"
-                controls
-                preload="none"
-                src={episode.audioUrl}
-              >
-                Your browser does not support audio playback.
-              </audio>
+              <PlaybackAudio src={episode.audioUrl} title={episode.title} />
             </article>
           ))}
         </div>

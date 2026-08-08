@@ -3,6 +3,7 @@ import type {
   PlatformCreator,
   PlatformEpisode,
 } from "../../../lib/platform-directory";
+import { PlaybackAudio } from "../../components/organic/playback-audio";
 
 function formatJoinedDate(value: string): string {
   return new Intl.DateTimeFormat("en-US", {
@@ -87,9 +88,7 @@ export function CreatorProfile({
                   <h3>{episode.title}</h3>
                   {episode.dek && <p>{episode.dek}</p>}
                 </div>
-                <audio controls preload="none" src={episode.audioUrl}>
-                  Your browser does not support audio playback.
-                </audio>
+                <PlaybackAudio src={episode.audioUrl} title={episode.title} />
               </article>
             ))}
           </div>
