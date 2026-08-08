@@ -5,7 +5,7 @@ type ParsedFeed = {
   items: NormalizedCandidate[];
 };
 
-const MAX_FEED_BYTES = 2_000_000;
+const MAX_FEED_BYTES = 5_000_000;
 
 function decodeEntities(value: string): string {
   return value

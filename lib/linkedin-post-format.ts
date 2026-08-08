@@ -5,6 +5,7 @@ export const LINKEDIN_SOURCE_CTA_MAX_CHARACTERS = 180;
 
 export type LinkedInPostSource = {
   name: string;
+  title?: string;
   url: string;
 };
 
@@ -87,7 +88,8 @@ export function primaryLinkedInPostSource(
   const name = [item?.sourceName, citation?.title, item?.title]
     .map((candidate) => candidate?.replace(/\s+/g, " ").trim())
     .find(Boolean);
-  return name ? { name, url } : null;
+  const title = item?.title?.replace(/\s+/g, " ").trim() || undefined;
+  return name ? { name, title, url } : null;
 }
 
 export function splitLinkedInPostSource(post: string): LinkedInPostParts {
@@ -142,10 +144,10 @@ export function normalizeLinkedInSourceCta(value: unknown): string | null {
   return cta;
 }
 
-export function fallbackLinkedInSourceCta(title: string): string {
+export function fallbackLinkedInSourceCta(subjectText: string): string {
   const safeFallback =
-    "Want to explore the topic covered in this episode in more detail?";
-  const subject = title
+    "Want to explore the topic covered in this post in more detail?";
+  const subject = subjectText
     .replace(/[\r\n]+/g, " ")
     .replace(/https?:\/\/\S+/giu, "")
     .replace(/\bSource\s*:/giu, "Source")
@@ -155,22 +157,22 @@ export function fallbackLinkedInSourceCta(title: string): string {
     .replaceAll('"', "'")
     .trim()
     .slice(0, 110);
-  const contextualSubject = subject || "the topic covered in this episode";
+  const contextualSubject = subject || "the topic covered in this post";
   const cta = `Want to explore ${contextualSubject} in more detail?`;
   return normalizeLinkedInSourceCta(cta) ?? safeFallback;
 }
 
-/** Preserve a generated CTA, upgrading legacy generic footers from the episode title. */
+/** Preserve a generated CTA, upgrading legacy generic footers from the post content. */
 export function resolveLinkedInSourceCta(
   persistedPost: string | null | undefined,
-  title: string,
+  subjectText: string,
 ): string {
   const persistedCta = persistedPost
     ? splitLinkedInPostSource(persistedPost).sourceCta
     : null;
   return (
     normalizeLinkedInSourceCta(persistedCta) ??
-    fallbackLinkedInSourceCta(title)
+    fallbackLinkedInSourceCta(subjectText)
   );
 }
 

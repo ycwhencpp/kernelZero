@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { AppUser, DashboardState, Episode } from "../../lib/types";
 import { formatDuration } from "../../lib/domain";
+import { PLAYBACK_RATE_OPTIONS } from "../../lib/playback";
 import {
   linkedInPostEditorDraft,
   resolveLinkedInPostEditorValue,
@@ -93,7 +94,7 @@ export function OrganicReviewView({
   const linkedInSource = primaryLinkedInPostSource(episode, state.items);
   const linkedInSourceCta = resolveLinkedInSourceCta(
     storedLinkedInPost,
-    episode.title,
+    storedLinkedInParts.content.trim() || episode.title,
   );
   const linkedInPost =
     storedLinkedInPost?.trim() &&
@@ -542,11 +543,11 @@ export function OrganicReviewView({
                     onPlaybackRateChange(Number(event.target.value))
                   }
                 >
-                  <option value={0.75}>0.75x</option>
-                  <option value={1}>1x</option>
-                  <option value={1.25}>1.25x</option>
-                  <option value={1.5}>1.5x</option>
-                  <option value={2}>2x</option>
+                  {PLAYBACK_RATE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
                 </select>
               </>
             ) : (

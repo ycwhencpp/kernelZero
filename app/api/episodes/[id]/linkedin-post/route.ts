@@ -139,7 +139,7 @@ export async function PATCH(
     }
     const sourceCta = resolveLinkedInSourceCta(
       episode.linkedInPost,
-      episode.title,
+      content,
     );
     const postWithSource = appendLinkedInPostSource(
       content,

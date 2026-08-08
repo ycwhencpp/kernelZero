@@ -24,6 +24,7 @@ import {
   type PodcastDraft,
 } from "./podcast-schema";
 import { podcastSourcePacket, podcastVerificationSources } from "./podcast-source";
+import { prepareForSpeech } from "./narration-text";
 import {
   findRepeatedParagraphs,
   repetitionFailureMessage,
@@ -49,6 +50,7 @@ import {
   linkedinPostSchema,
   type LinkedInPostDraft,
 } from "./linkedin-post";
+import type { LinkedInPostSource } from "./linkedin-post-format";
 
 export { chunkForSpeech };
 
@@ -100,6 +102,7 @@ function extractResponseText(payload: Record<string, unknown>): string {
 export async function createLinkedInPost(
   title: string,
   transcript: string,
+  source: LinkedInPostSource,
 ): Promise<LinkedInPostDraft> {
   const env = runtimeEnv();
   if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
@@ -120,7 +123,7 @@ export async function createLinkedInPost(
         },
         {
           role: "user",
-          content: [{ type: "input_text", text: linkedinPostPrompt(title, transcript) }],
+          content: [{ type: "input_text", text: linkedinPostPrompt(title, transcript, source) }],
         },
       ],
       text: {
@@ -327,7 +330,7 @@ async function resizeStructuredPodcast(
 async function synthesizeSpeech(script: string): Promise<ArrayBuffer> {
   const env = runtimeEnv();
   if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
-  const chunks = chunkForSpeech(script, 3_600);
+  const chunks = chunkForSpeech(prepareForSpeech(script), 3_600);
   const buffers: ArrayBuffer[] = [];
   const model = env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
 

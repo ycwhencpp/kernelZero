@@ -6,6 +6,7 @@ import {
 } from "./podcast-length";
 import { podcastSchema, type PodcastDraft } from "./podcast-schema";
 import { podcastSourcePacket, podcastVerificationSources } from "./podcast-source";
+import { prepareForSpeech } from "./narration-text";
 import { chunkForSpeech } from "./speech-chunk";
 import {
   podcastRegenerationInstruction,
@@ -23,6 +24,7 @@ import {
   linkedinPostSchema,
   type LinkedInPostDraft,
 } from "./linkedin-post";
+import type { LinkedInPostSource } from "./linkedin-post-format";
 
 function geminiKey(): string {
   const key = process.env.GEMINI_API_KEY;
@@ -97,6 +99,7 @@ async function generateContent(
 export async function createLinkedInPost(
   title: string,
   transcript: string,
+  source: LinkedInPostSource,
 ): Promise<LinkedInPostDraft> {
   const payload = await generateContent(textModel(false), {
     systemInstruction: {
@@ -105,7 +108,7 @@ export async function createLinkedInPost(
     contents: [
       {
         role: "user",
-        parts: [{ text: linkedinPostPrompt(title, transcript) }],
+        parts: [{ text: linkedinPostPrompt(title, transcript, source) }],
       },
     ],
     generationConfig: {
@@ -287,7 +290,7 @@ async function synthesizeSpeechChunk(text: string): Promise<Uint8Array> {
 }
 
 export async function synthesizeSpeech(script: string): Promise<ArrayBuffer> {
-  const chunks = chunkForSpeech(script, 3_600);
+  const chunks = chunkForSpeech(prepareForSpeech(script), 3_600);
   const pcmParts: Uint8Array[] = [];
   for (const chunk of chunks) {
     pcmParts.push(await synthesizeSpeechChunk(chunk));

@@ -20,6 +20,24 @@ Perform this as a close-mic adult male podcast host speaking to one listener. Us
 Follow the meaning of each passage: add a subtle lift in energy and intonation for genuine surprise or excitement; become slower, softer, and more sober for harm, loss, uncertainty, or disappointing news; use firmer emphasis only for important conclusions. Leave short breaths between thoughts and a longer pause after revelations or topic changes. Do not overact, add words, read labels or directions aloud, or turn the performance into a trailer voice.
 `.trim();
 
+export const STOCK_PODCAST_TRANSITION_REWRITE =
+  /\bto understand(?:\s+how)?\s+[^.!?\n]{1,160},\s+we\s+(?:need|have)\s+to\s+look\s+at\s+/gi;
+
+export function rewriteStockPodcastTransitions(script: string): string {
+  return script.replace(STOCK_PODCAST_TRANSITION_REWRITE, (match, offset) => {
+    const isSentenceStart = offset === 0 || /(?:^|[.!?\n])\s*$/.test(script.slice(Math.max(0, offset - 5), offset));
+    return isSentenceStart ? "The evidence next points to " : "the evidence next points to ";
+  });
+}
+
+/**
+ * Normalizes LLM prose into safe, consistent podcast narration by rewriting stock
+ * transitions and removing AI-production disclosures.
+ */
+export function normalizePodcastNarration(script: string): string {
+  return rewriteStockPodcastTransitions(removeAiProductionDisclosures(script));
+}
+
 const STOCK_PODCAST_TRANSITION =
   /\bto understand(?:\s+how)?\s+[^.!?\n]{1,160},\s+we\s+(?:need|have)\s+to\s+look\s+at\b/i;
 const REQUIRED_PODCAST_GREETING = "Welcome to KernelZero.";

@@ -15,8 +15,10 @@ import { OrganicReviewView } from "./views/organic-review-view";
 import { OrganicCreateView } from "./views/organic-create-view";
 import { OrganicProfileView } from "./views/organic-profile-view";
 import {
+  applyPlaybackRate,
   clampPlaybackSeconds,
-  PLAYBACK_RATES,
+  normalizePlaybackRate,
+  type PlaybackRate,
 } from "../lib/playback";
 import {
   reconcileGeneratedEpisode,
@@ -134,7 +136,7 @@ export function DashboardClient({
     useState<OrganicView>(initialReviewReturnView);
   const [playbackSeconds, setPlaybackSeconds] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(0);
-  const [playbackRate, setPlaybackRate] = useState(1);
+  const [playbackRate, setPlaybackRate] = useState<PlaybackRate>(1);
   const [audioStatus, setAudioStatus] = useState<AudioStatus>("missing");
   const [footerYear] = useState(() => new Date().getFullYear());
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -315,8 +317,7 @@ export function DashboardClient({
       audio.src = episode.audioUrl;
       audio.dataset.episodeId = episode.id;
       audio.preload = "auto";
-      audio.defaultPlaybackRate = playbackRate;
-      audio.playbackRate = playbackRate;
+      applyPlaybackRate(audio, playbackRate);
 
       const applyPendingSeek = () => {
         const pending = pendingSeekRef.current;
@@ -507,15 +508,10 @@ export function DashboardClient({
   };
 
   const changePlaybackRate = (rate: number) => {
-    const nextRate = PLAYBACK_RATES.includes(
-      rate as (typeof PLAYBACK_RATES)[number],
-    )
-      ? rate
-      : 1;
+    const nextRate = normalizePlaybackRate(rate);
     setPlaybackRate(nextRate);
     if (audioRef.current) {
-      audioRef.current.defaultPlaybackRate = nextRate;
-      audioRef.current.playbackRate = nextRate;
+      applyPlaybackRate(audioRef.current, nextRate);
     }
   };
 

@@ -3524,6 +3524,42 @@ img {
   height: 40px;
 }
 
+.platform-audio-player {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  min-width: 0;
+  width: 100%;
+}
+
+.platform-audio-player > audio {
+  min-width: 0;
+}
+
+.platform-playback-rate {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.platform-playback-rate select {
+  height: 40px;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .platform-back-link {
   display: inline-flex;
   margin: 0 0 18px;

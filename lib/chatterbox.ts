@@ -180,6 +180,8 @@ export async function synthesizeChatterboxSpeechWithMetadata(
       throw new Error("The local Chatterbox worker did not complete narration.");
     }
     let tempoFilter: string[] = [];
+    // This is bounded mastering correction only. Listener-selected playback
+    // rates are always applied by players and never baked into the stored MP3.
     const promptedDurationSeconds =
       chatterboxTargetDurationSeconds(script) ?? targetDurationSeconds;
     if (promptedDurationSeconds && promptedDurationSeconds > 0) {

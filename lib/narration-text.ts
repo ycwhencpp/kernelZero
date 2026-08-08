@@ -12,6 +12,70 @@ export const CHATTERBOX_NATIVE_DELIVERY_TAGS = [
   "[surprised]",
 ] as const;
 
+const TECHNICAL_PRONUNCIATIONS = [
+  ["KernelZero", "Kernel Zero"],
+  ["OpenAI", "Open A I"],
+  ["ChatGPT", "Chat G P T"],
+  ["Node.js", "Node J S"],
+  ["Next.js", "Next J S"],
+  ["macOS", "Mac O S"],
+  ["iOS", "eye O S"],
+  ["arXiv", "archive"],
+  ["CI/CD", "C I C D"],
+  ["Q&A", "Q and A"],
+  ["I/O", "I O"],
+  ["C++", "C plus plus"],
+  ["C#", "C sharp"],
+  [".NET", "dot net"],
+] as const;
+
+const INITIALISM_PRONUNCIATIONS = {
+  AI: "A I",
+  API: "A P I",
+  CDN: "C D N",
+  CLI: "C L I",
+  CPU: "C P U",
+  CSS: "C S S",
+  CSV: "C S V",
+  DNS: "D N S",
+  GPT: "G P T",
+  GPU: "G P U",
+  HTML: "H T M L",
+  HTTP: "H T T P",
+  HTTPS: "H T T P S",
+  IP: "I P",
+  JWT: "J W T",
+  KPI: "K P I",
+  LLM: "L L M",
+  MCP: "M C P",
+  NLP: "N L P",
+  PDF: "P D F",
+  RSS: "R S S",
+  SDK: "S D K",
+  SLA: "S L A",
+  SLO: "S L O",
+  TCP: "T C P",
+  TLS: "T L S",
+  TTS: "T T S",
+  UI: "U I",
+  URL: "U R L",
+  UX: "U X",
+  WPM: "W P M",
+  XML: "X M L",
+} as const;
+
+const INITIALISM_KEYS = Object.keys(INITIALISM_PRONUNCIATIONS).sort(
+  (left, right) => right.length - left.length,
+);
+const INITIALISM_PATTERN = new RegExp(
+  `\\b(${INITIALISM_KEYS.join("|")})(s)?\\b`,
+  "g",
+);
+const INITIALISM_VERSION_PATTERN = new RegExp(
+  `\\b(${INITIALISM_KEYS.join("|")})-(?=\\d)`,
+  "g",
+);
+
 const SOMBER_CONTEXT =
   /\b(?:died|death|killed|loss of life|tragic|devastating|suffering|grief|human cost|serious consequences|people were harmed|failed|failure|setback|disappointing|fell short)\b/i;
 const SURPRISED_CONTEXT =
@@ -31,16 +95,98 @@ function cleanBracketCue(_match: string, content: string): string {
   return PERFORMANCE_CUE.test(content) ? " " : content;
 }
 
+function escapeRegularExpression(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function replaceExactWrittenForm(
+  text: string,
+  written: string,
+  spoken: string,
+): string {
+  const pattern = new RegExp(
+    `(?<![\\p{L}\\p{N}_])${escapeRegularExpression(written)}(?![\\p{L}\\p{N}_])`,
+    "gu",
+  );
+  return text.replace(pattern, () => spoken);
+}
+
+function configuredPronunciations(
+  value = process.env.TTS_PRONUNCIATION_OVERRIDES,
+): Array<readonly [string, string]> {
+  if (!value?.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(
+      "TTS_PRONUNCIATION_OVERRIDES must be a JSON object of written and spoken forms.",
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      "TTS_PRONUNCIATION_OVERRIDES must be a JSON object of written and spoken forms.",
+    );
+  }
+  const entries = Object.entries(parsed);
+  if (
+    entries.length > 100 ||
+    entries.some(
+      ([written, spoken]) =>
+        !written.trim() ||
+        written.length > 100 ||
+        typeof spoken !== "string" ||
+        !spoken.trim() ||
+        spoken.length > 200,
+    )
+  ) {
+    throw new Error(
+      "TTS_PRONUNCIATION_OVERRIDES supports up to 100 non-empty string mappings.",
+    );
+  }
+  return entries
+    .map(([written, spoken]) => [written, (spoken as string).trim()] as const)
+    .sort(([left], [right]) => right.length - left.length);
+}
+
+/** Changes only the text sent to TTS; the saved script remains untouched. */
+export function applySpeechPronunciations(
+  text: string,
+  configuredValue = process.env.TTS_PRONUNCIATION_OVERRIDES,
+): string {
+  let spokenText = text;
+  for (const [written, spoken] of configuredPronunciations(configuredValue)) {
+    spokenText = replaceExactWrittenForm(spokenText, written, spoken);
+  }
+  for (const [written, spoken] of TECHNICAL_PRONUNCIATIONS) {
+    spokenText = replaceExactWrittenForm(spokenText, written, spoken);
+  }
+  spokenText = spokenText.replace(
+    INITIALISM_VERSION_PATTERN,
+    (_match, initialism: keyof typeof INITIALISM_PRONUNCIATIONS) =>
+      `${INITIALISM_PRONUNCIATIONS[initialism]} `,
+  );
+  return spokenText.replace(
+    INITIALISM_PATTERN,
+    (
+      _match,
+      initialism: keyof typeof INITIALISM_PRONUNCIATIONS,
+      plural: string | undefined,
+    ) => `${INITIALISM_PRONUNCIATIONS[initialism]}${plural ? "'s" : ""}`,
+  );
+}
+
 function cleanNarrationParagraph(paragraph: string): string {
-  return paragraph
+  const cleaned = paragraph
     .replace(/^\s{0,3}#{1,6}\s*/gm, "")
     .replace(/^\s*[-*+]\s+/gm, "")
     .replace(/[•▪◦]/g, ". ")
     .replace(/&/g, " and ")
     .replace(/%/g, " percent ")
-    .replace(/\bAI\b/g, "A I")
     .replace(/[|_]/g, " ")
-    .replace(/\s*\n\s*/g, " ")
+    .replace(/\s*\n\s*/g, " ");
+
+  return applySpeechPronunciations(cleaned)
     .replace(/[ \t]+/g, " ")
     .replace(/\s+([,.;!?])/g, "$1")
     .trim();
@@ -72,6 +218,11 @@ export function prepareForChatterbox(script: string): string {
     );
 
   return paragraphs.join("\n\n");
+}
+
+/** Shared speech preparation for Chatterbox, OpenAI, Gemini, and macOS. */
+export function prepareForSpeech(script: string): string {
+  return prepareForChatterbox(script);
 }
 
 function deliveryForText(text: string): {

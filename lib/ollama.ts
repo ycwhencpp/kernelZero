@@ -38,6 +38,7 @@ import {
   linkedinPostSchema,
   type LinkedInPostDraft,
 } from "./linkedin-post";
+import type { LinkedInPostSource } from "./linkedin-post-format";
 
 const execFileAsync = promisify(execFile);
 
@@ -65,7 +66,7 @@ type RepetitionIssue = {
 type PlannedFact = {
   id: string;
   statement: string;
-  sourceNumber: number;
+  sourceNumbers: number[];
   sectionNumber: number;
 };
 
@@ -408,11 +409,12 @@ async function chat(
 export async function createLinkedInPost(
   title: string,
   transcript: string,
+  source: LinkedInPostSource,
 ): Promise<LinkedInPostDraft> {
   const content = await chat(
     [
       { role: "system", content: LINKEDIN_POST_SYSTEM_PROMPT },
-      { role: "user", content: linkedinPostPrompt(title, transcript) },
+      { role: "user", content: linkedinPostPrompt(title, transcript, source) },
     ],
     {
       format: linkedinPostSchema(),
@@ -565,10 +567,13 @@ function podcastPlanSchema() {
           properties: {
             id: { type: "string" },
             statement: { type: "string" },
-            sourceNumber: { type: "integer" },
+            sourceNumbers: {
+              type: "array",
+              items: { type: "integer" },
+            },
             sectionNumber: { type: "integer" },
           },
-          required: ["id", "statement", "sourceNumber", "sectionNumber"],
+          required: ["id", "statement", "sourceNumbers", "sectionNumber"],
         },
       },
       sections: {
@@ -606,15 +611,20 @@ export function normalizePodcastPlan(
     const statement = typeof fact.statement === "string"
       ? fact.statement.trim()
       : "";
-    const sourceNumber = Number(fact.sourceNumber);
+    const rawSourceNumbers = Array.isArray(fact.sourceNumbers)
+      ? fact.sourceNumbers
+      : typeof fact.sourceNumber === "number"
+        ? [fact.sourceNumber]
+        : [];
+    const sourceNumbers = [...new Set(rawSourceNumbers.map(Number))]
+      .filter((n) => Number.isInteger(n) && n >= 1 && n <= items.length)
+      .sort((a, b) => a - b);
     const sectionNumber = Number(fact.sectionNumber);
     const normalized = statement.toLocaleLowerCase("en-US");
     if (
       !statement ||
       seenFacts.has(normalized) ||
-      !Number.isInteger(sourceNumber) ||
-      sourceNumber < 1 ||
-      sourceNumber > items.length ||
+      sourceNumbers.length === 0 ||
       !Number.isInteger(sectionNumber) ||
       sectionNumber < 1 ||
       sectionNumber > sectionPlans.length
@@ -627,7 +637,7 @@ export function normalizePodcastPlan(
         ? fact.id.trim()
         : `F${index + 1}`,
       statement,
-      sourceNumber,
+      sourceNumbers,
       sectionNumber,
     });
   }
@@ -702,7 +712,7 @@ async function createPodcastPlan(
           role: "user",
           content: `Create the title, one-sentence dek, and a compact editorial fact-ownership plan for a ${episodeType.replaceAll("_", " ")}.
 
-Produce no more than ${factCardLimit} source-grounded fact cards, using fewer when the sources do not support ${factCardLimit}. Limit every fact statement to 25 words. Each fact must name one valid sourceNumber and exactly one sectionNumber. Do not assign detailed facts to sections 1, 2, or 7. Section 5 owns evidence limitations and publication status. Section 6 owns implications, not repeated findings.
+Produce no more than ${factCardLimit} source-grounded fact cards, using fewer when the sources do not support ${factCardLimit}. Limit every fact statement to 25 words. Each fact must name exactly one sectionNumber and a list of corroborating sourceNumbers. When two or more sources cover the same fact or topic, create ONE merged fact card listing ALL corroborating source numbers in sourceNumbers, assigned to exactly one section. Never create separate cards for the same topic from different sources. Do not assign detailed facts to sections 1, 2, or 7. Section 5 owns evidence limitations and publication status. Section 6 owns implications, not repeated findings.
 
 Return exactly seven section entries, numbered 1 through 7, with each focus limited to 20 words. Never repeat a fact card or section entry.
 
@@ -1699,7 +1709,7 @@ function sourcePacketForSection(
     plan.title !== "Background" &&
     plan.title !== "What to watch next"
   ) {
-    const sourceNumbers = new Set(plannedFacts.map((fact) => fact.sourceNumber));
+    const sourceNumbers = new Set(plannedFacts.flatMap((fact) => fact.sourceNumbers));
     if (sourceNumbers.size) {
       packet = packet.filter((source) => sourceNumbers.has(source.source));
     }
@@ -1957,7 +1967,7 @@ PARALLEL SECTION CONTRACT:
 - Section ${sectionNumber} focus: ${plannedSection?.focus ?? plan.direction}
 - This section exclusively owns these detailed facts:
 ${assignedFacts.length
-  ? assignedFacts.map((fact) => `  - ${fact.id} [source ${fact.sourceNumber}]: ${fact.statement}`).join("\n")
+  ? assignedFacts.map((fact) => `  - ${fact.id} [sources ${fact.sourceNumbers.join(",")}]: ${fact.statement}`).join("\n")
   : sectionNumber === 1 || sectionNumber === 2 || sectionNumber === 7
     ? "  - No detailed fact cards are appropriate for this framing section. Stay qualitative."
     : "  - The planner supplied no fact cards. Use only source-grounded details that fit this section's purpose, and do not borrow facts explicitly owned elsewhere."}
@@ -1967,6 +1977,7 @@ ${factsOwnedElsewhere.length ? factsOwnedElsewhere.map((fact) => `  - ${fact.id}
 DUPLICATION RULES:
 - Do not repeat a fact, event description, example, number, mechanism, or explanation that an earlier section already covered, even with different wording.
 - When multiple sources cover the same fact, synthesize them once. Mention corroboration only when it adds something about confidence or evidence quality; do not retell the fact.
+- When a fact card lists multiple sources, write ONE combined paragraph synthesizing all of them; never one paragraph per source.
 - A brief transition may refer back to an earlier idea, but it must not explain that idea again.
 ${earlierSections.length ? `
 EARLIER SECTIONS — ALREADY COVERED:
@@ -2148,6 +2159,19 @@ ${JSON.stringify(sourcePacketForSection(items, plan, assignedFacts))}`;
     );
     return best;
   }
+  if (
+    draftToExpand &&
+    COMPLETE_NARRATION_ENDING.test(draftToExpand.script) &&
+    !hasDanglingNarrationEnding(draftToExpand.script) &&
+    countScriptWords(draftToExpand.script) >= minimumUsableDraftWords &&
+    countScriptWords(draftToExpand.script) <= acceptedRange.maxWords
+  ) {
+    logOllamaDecision(
+      "accepted_repair_rollback",
+      `section=${sectionNumber} script_words=${countScriptWords(draftToExpand.script)} target=${minWords}-${maxWords} accepted=${acceptedRange.minWords}-${acceptedRange.maxWords}`,
+    );
+    return draftToExpand;
+  }
   if (bestOpeningStyleFailure) {
     throw new Error(
       `Ollama could not repair the ${plan.title} opening. ${bestOpeningStyleFailure}`,
@@ -2311,13 +2335,15 @@ ${podcastPlan.sections[sectionIndex]?.focus ?? sectionPlan.direction}
 
 FACTS OWNED BY THIS SECTION:
 ${assignedFacts.length
-  ? assignedFacts.map((fact) => `- ${fact.id} [source ${fact.sourceNumber}]: ${fact.statement}`).join("\n")
+  ? assignedFacts.map((fact) => `- ${fact.id} [sources ${fact.sourceNumbers.join(",")}]: ${fact.statement}`).join("\n")
   : "- No detailed fact cards are assigned. Add only cautious explanation appropriate to this section."}
 
 FACTS RESERVED FOR OTHER SECTIONS — DO NOT USE:
 ${factsOwnedElsewhere.length
   ? factsOwnedElsewhere.map((fact) => `- ${fact.id} belongs to section ${fact.sectionNumber}: ${fact.statement}`).join("\n")
   : "- None."}
+
+When a fact card lists multiple sources, write ONE combined paragraph synthesizing all of them; never one paragraph per source.
 
 EXISTING SECTION:
 ${sections[sectionIndex].script.trim()}
@@ -3214,6 +3240,7 @@ async function reviewAndRepairSections(
   const maxNarrativeRepairBatches = 2;
   let evidenceRepairBatches = 0;
   let narrativeRepairBatches = 0;
+  const rolledBackSections = new Set<number>();
 
   while (true) {
     const { evidence, narrative } = await runPodcastCritics(items, current);
@@ -3261,6 +3288,12 @@ async function reviewAndRepairSections(
       feedbackBySection.set(issue.sectionNumber, feedback);
     }
     for (const issue of narrativeIssues) {
+      if (
+        rolledBackSections.has(issue.sectionNumber) &&
+        !evidence.issues.some((e) => e.sectionNumber === issue.sectionNumber)
+      ) {
+        continue;
+      }
       const feedback = feedbackBySection.get(issue.sectionNumber) ?? [];
       feedback.push(
         `Narrative: ${issue.problem} Repair: ${issue.instruction}`,
@@ -3302,21 +3335,25 @@ async function reviewAndRepairSections(
         sectionAcceptedRange.minWords,
       );
       const repairedWords = countScriptWords(repairedSection.script);
-      if (repairedWords < repairWordFloor) {
-        throw new Error(
-          `Ollama's section ${sectionNumber} repair collapsed from ${priorWords} to ${repairedWords} words; at least ${repairWordFloor} words are required.`,
+      if (repairedWords < repairWordFloor || repairedSection.script === current[sectionNumber - 1].script) {
+        logOllamaDecision(
+          "repair_rollback",
+          `section=${sectionNumber} prior_words=${priorWords} repaired_words=${repairedWords} floor=${repairWordFloor}`,
         );
+        rolledBackSections.add(sectionNumber);
+        repaired[sectionNumber - 1] = current[sectionNumber - 1];
+      } else {
+        repaired[sectionNumber - 1] = sectionNumber === 1
+          ? {
+              ...repairedSection,
+              script: restorePodcastOpeningParagraph(
+                current[0].script,
+                repairedSection.script,
+                true,
+              ),
+            }
+          : repairedSection;
       }
-      repaired[sectionNumber - 1] = sectionNumber === 1
-        ? {
-            ...repairedSection,
-            script: restorePodcastOpeningParagraph(
-              current[0].script,
-              repairedSection.script,
-              true,
-            ),
-          }
-        : repairedSection;
     });
     current = removeSectionRepetition(repaired);
 
