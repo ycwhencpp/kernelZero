@@ -1,7 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { AppUser, DashboardState, Episode, EpisodeLength, WorkspaceSettings } from "../lib/types";
+import type {
+  AppUser,
+  DashboardState,
+  Episode,
+  EpisodeAudioVariant,
+  EpisodeLength,
+  WorkspaceSettings,
+} from "../lib/types";
 import {
   OrganicAppShell,
   type OrganicView,
@@ -25,9 +32,13 @@ import {
   requireGeneratedAudio,
 } from "../lib/generated-episode";
 import { buildRegenerateEpisodeRequest } from "../lib/podcast-regeneration";
+import {
+  resolveReviewAudioVariantId,
+  reviewAudioSyncAction,
+  type ReviewAudioStatus,
+} from "../lib/review-audio-state";
 
 type Modal = "interest" | "source" | null;
-type AudioStatus = "missing" | "loading" | "ready" | "error";
 
 function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
   return fetch(input, {
@@ -76,6 +87,35 @@ function pushClientRoute(route: string) {
   }
 }
 
+function selectedVariantForEpisode(
+  episode: Episode | null | undefined,
+  preferredVariantId: string | null | undefined,
+): EpisodeAudioVariant | null {
+  if (!episode) return null;
+  const variants = episode.audioVariants ?? [];
+  const variantId = resolveReviewAudioVariantId(
+    variants,
+    preferredVariantId,
+    episode.defaultAudioVariantId,
+  );
+  return variants.find((variant) => variant.id === variantId) ?? null;
+}
+
+function episodeWithAudioVariant(
+  episode: Episode,
+  variant: EpisodeAudioVariant | null,
+): Episode {
+  if (!variant) return episode;
+  return {
+    ...episode,
+    audioUrl: variant.audioUrl,
+    audioKey: variant.audioKey,
+    audioBytes: variant.audioBytes,
+    durationSeconds: variant.durationSeconds,
+    chapters: variant.chapters,
+  };
+}
+
 function clientRouteFromUrl(url: URL): {
   view: OrganicView;
   episodeId?: string;
@@ -115,12 +155,14 @@ export function DashboardClient({
   initialView,
   initialEpisodeId = null,
   initialReviewReturnView = "dashboard",
+  generationSourceLimit = null,
 }: {
   initialState: DashboardState;
   user: AppUser;
   initialView: OrganicView;
   initialEpisodeId?: string | null;
   initialReviewReturnView?: OrganicView;
+  generationSourceLimit?: number | null;
 }) {
   const [state, setState] = useState(initialState);
   const [user, setUser] = useState(initialUser);
@@ -132,18 +174,34 @@ export function DashboardClient({
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(
     initialEpisodeId,
   );
+  const [selectedAudioVariantId, setSelectedAudioVariantId] = useState<
+    string | null
+  >(() => {
+    const initialEpisode = initialState.episodes.find(
+      (episode) => episode.id === initialEpisodeId,
+    );
+    return selectedVariantForEpisode(initialEpisode, null)?.id ?? null;
+  });
   const [reviewReturnView, setReviewReturnView] =
     useState<OrganicView>(initialReviewReturnView);
   const [playbackSeconds, setPlaybackSeconds] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(0);
   const [playbackRate, setPlaybackRate] = useState<PlaybackRate>(1);
-  const [audioStatus, setAudioStatus] = useState<AudioStatus>("missing");
+  const [audioStatus, setAudioStatus] = useState<ReviewAudioStatus>(() => {
+    const initialReviewEpisode = initialState.episodes.find(
+      (episode) => episode.id === initialEpisodeId,
+    );
+    return initialView === "review" && initialReviewEpisode?.audioUrl
+      ? "loading"
+      : "missing";
+  });
   const [footerYear] = useState(() => new Date().getFullYear());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canEdit = user.role === "owner" || user.role === "editor";
   const canPublish = user.role === "owner";
   const pendingSeekRef = useRef<{
     episodeId: string;
+    variantId: string;
     seconds: number;
   } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -163,6 +221,18 @@ export function DashboardClient({
     );
   }, [state.episodes, selectedEpisodeId, digest]);
 
+  const selectedAudioVariant = useMemo(
+    () => selectedVariantForEpisode(reviewEpisode, selectedAudioVariantId),
+    [reviewEpisode, selectedAudioVariantId],
+  );
+
+  const reviewPlaybackEpisode = useMemo(
+    () => reviewEpisode
+      ? episodeWithAudioVariant(reviewEpisode, selectedAudioVariant)
+      : undefined,
+    [reviewEpisode, selectedAudioVariant],
+  );
+
   const notify = (message: string) => {
     setToast(message);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -171,6 +241,22 @@ export function DashboardClient({
 
   const updatePlaybackPosition = (seconds: number) => {
     setPlaybackSeconds(seconds);
+  };
+
+  const stopReviewPlayback = () => {
+    const audio = audioRef.current;
+    audio?.pause();
+    if (audio) {
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // The next review load will reset an unseekable source.
+      }
+    }
+    pendingSeekRef.current = null;
+    setPlayingId(null);
+    updatePlaybackPosition(0);
+    setPlaybackDuration(0);
   };
 
   useEffect(() => {
@@ -194,6 +280,9 @@ export function DashboardClient({
       notify("Only the workspace owner can manage settings.");
       return;
     }
+    if (view === "review" && next !== "review") {
+      stopReviewPlayback();
+    }
     setView(next);
     const route = viewRoutes[next];
     if (route) pushClientRoute(route);
@@ -201,6 +290,8 @@ export function DashboardClient({
   };
 
   const openReview = (episode: Episode, returnView: OrganicView = view) => {
+    const variant = selectedVariantForEpisode(episode, null);
+    const playbackEpisode = episodeWithAudioVariant(episode, variant);
     audioRef.current?.pause();
     if (audioRef.current?.dataset.episodeId === episode.id) {
       audioRef.current.currentTime = 0;
@@ -208,8 +299,9 @@ export function DashboardClient({
     pendingSeekRef.current = null;
     updatePlaybackPosition(0);
     setPlaybackDuration(0);
-    setAudioStatus(episode.audioUrl ? "loading" : "missing");
+    setAudioStatus(playbackEpisode.audioUrl ? "loading" : "missing");
     setSelectedEpisodeId(episode.id);
+    setSelectedAudioVariantId(variant?.id ?? null);
     const nextReturnView =
       returnView === "review" || returnView === "create"
         ? "dashboard"
@@ -220,7 +312,9 @@ export function DashboardClient({
       `/review/${encodeURIComponent(episode.id)}?from=${encodeURIComponent(nextReturnView)}`,
     );
     window.scrollTo({ top: 0, behavior: "smooth" });
-    if (episode.audioUrl) loadEpisodeAudio(episode);
+    if (playbackEpisode.audioUrl) {
+      loadEpisodeAudio(playbackEpisode, variant?.id ?? "canonical");
+    }
   };
 
   const generateEpisode = async (
@@ -250,6 +344,7 @@ export function DashboardClient({
         provider: "openai" | "gemini" | "ollama";
         state: DashboardState;
         audioError?: string;
+        sourceSelectionNotice?: string;
       }>("/api/generate", {
         method: "POST",
         body: JSON.stringify(requestBody),
@@ -261,23 +356,44 @@ export function DashboardClient({
       if (!payload.audioError) {
         requireGeneratedAudio(generated.episode, requestBody.includeAudio);
       }
+      const generatedVariant = selectedVariantForEpisode(
+        generated.episode,
+        null,
+      );
+      const generatedPlaybackEpisode = episodeWithAudioVariant(
+        generated.episode,
+        generatedVariant,
+      );
       setState(generated.state);
       setSelectedEpisodeId(generated.episode.id);
+      setSelectedAudioVariantId(generatedVariant?.id ?? null);
       setReviewReturnView("dashboard");
       updatePlaybackPosition(0);
       setPlaybackDuration(0);
-      setAudioStatus(generated.episode.audioUrl ? "loading" : "missing");
+      setAudioStatus(generatedPlaybackEpisode.audioUrl ? "loading" : "missing");
       setView("review");
       pushClientRoute(
         `/review/${encodeURIComponent(generated.episode.id)}?from=dashboard`,
       );
-      if (generated.episode.audioUrl) loadEpisodeAudio(generated.episode);
-      notify(
-        payload.audioError
-          ? `${payload.audioError} Use Generate Audio to retry.`
+      if (generatedPlaybackEpisode.audioUrl) {
+        loadEpisodeAudio(
+          generatedPlaybackEpisode,
+          generatedVariant?.id ?? "canonical",
+        );
+      }
+      const completionMessage = payload.audioError
+        ? `${payload.audioError} Use Generate Audio to retry.`
+        : generated.episode.generationWarning === "length_below_target"
+          ? "Draft saved, but the transcript runs short of the selected episode length."
+          : generated.episode.generationWarning
+          ? "Draft saved, but its title needs review before publishing."
           : regeneration
             ? "Draft regenerated from the current version and is ready for review."
-            : "Evidence-checked script and local audio are ready for review.",
+            : "Evidence-checked script and local audio are ready for review.";
+      notify(
+        payload.sourceSelectionNotice
+          ? `${completionMessage} ${payload.sourceSelectionNotice}`
+          : completionMessage,
       );
     } catch (error) {
       notify(error instanceof Error ? error.message : "Generation failed.");
@@ -286,14 +402,27 @@ export function DashboardClient({
     }
   };
 
-  const approveEpisode = async (episodeId: string) => {
+  const approveEpisode = async (
+    episodeId: string,
+    overrideTitleWarning = false,
+    defaultAudioVariantId: string | null = null,
+  ) => {
     setBusy(`approve:${episodeId}`);
     try {
       const payload = await requestJson<{ state: DashboardState }>(
         `/api/episodes/${encodeURIComponent(episodeId)}/approve`,
-        { method: "POST" },
+        {
+          method: "POST",
+          body: JSON.stringify({
+            overrideTitleWarning,
+            ...(defaultAudioVariantId
+              ? { defaultAudioVariantId }
+              : {}),
+          }),
+        },
       );
       setState(payload.state);
+      stopReviewPlayback();
       setView("published");
       pushClientRoute("/published");
       notify("Episode approved and queued for the public feed.");
@@ -304,18 +433,27 @@ export function DashboardClient({
     }
   };
 
-  const loadEpisodeAudio = (episode: Episode): HTMLAudioElement | null => {
+  const loadEpisodeAudio = (
+    episode: Episode,
+    variantId = episode.defaultAudioVariantId ?? "canonical",
+  ): HTMLAudioElement | null => {
     if (!episode.audioUrl) return null;
     const audio = audioRef.current;
     if (!audio) return null;
+    const isCurrentSource = () =>
+      audio.dataset.episodeId === episode.id &&
+      audio.dataset.variantId === variantId &&
+      audio.getAttribute("src") === episode.audioUrl;
     if (
       audio.dataset.episodeId !== episode.id ||
+      audio.dataset.variantId !== variantId ||
       audio.getAttribute("src") !== episode.audioUrl
     ) {
       audio.pause();
       setAudioStatus("loading");
       audio.src = episode.audioUrl;
       audio.dataset.episodeId = episode.id;
+      audio.dataset.variantId = variantId;
       audio.preload = "auto";
       applyPlaybackRate(audio, playbackRate);
 
@@ -323,6 +461,8 @@ export function DashboardClient({
         const pending = pendingSeekRef.current;
         if (
           pending?.episodeId !== episode.id ||
+          pending.variantId !== variantId ||
+          !isCurrentSource() ||
           audio.readyState < 1
         ) {
           return;
@@ -345,6 +485,7 @@ export function DashboardClient({
         }
       };
       const updateDuration = () => {
+        if (!isCurrentSource()) return;
         if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
         setPlaybackDuration(audio.duration);
         setAudioStatus("ready");
@@ -354,13 +495,19 @@ export function DashboardClient({
       audio.ondurationchange = updateDuration;
       audio.oncanplay = applyPendingSeek;
       audio.onplaying = applyPendingSeek;
-      audio.onplay = () => setPlayingId(episode.id);
+      audio.onplay = () => {
+        if (isCurrentSource()) setPlayingId(episode.id);
+      };
       audio.onpause = () => {
-        if (!audio.ended) setPlayingId(null);
+        if (isCurrentSource() && !audio.ended) setPlayingId(null);
       };
       audio.ontimeupdate = () => {
+        if (!isCurrentSource()) return;
         const pending = pendingSeekRef.current;
-        if (pending?.episodeId === episode.id) {
+        if (
+          pending?.episodeId === episode.id &&
+          pending.variantId === variantId
+        ) {
           if (Math.abs(audio.currentTime - pending.seconds) < 0.75) {
             pendingSeekRef.current = null;
           } else {
@@ -370,23 +517,30 @@ export function DashboardClient({
         updatePlaybackPosition(audio.currentTime);
       };
       audio.onseeked = () => {
+        if (!isCurrentSource()) return;
         const pending = pendingSeekRef.current;
         if (
           pending?.episodeId === episode.id &&
+          pending.variantId === variantId &&
           Math.abs(audio.currentTime - pending.seconds) < 0.75
         ) {
           pendingSeekRef.current = null;
-        } else if (pending?.episodeId === episode.id) {
+        } else if (
+          pending?.episodeId === episode.id &&
+          pending.variantId === variantId
+        ) {
           applyPendingSeek();
           return;
         }
         updatePlaybackPosition(audio.currentTime);
       };
       audio.onended = () => {
+        if (!isCurrentSource()) return;
         updatePlaybackPosition(audio.duration || episode.durationSeconds);
         setPlayingId(null);
       };
       audio.onerror = () => {
+        if (!isCurrentSource()) return;
         setPlayingId(null);
         setAudioStatus("error");
         notify("Stored audio could not be loaded.");
@@ -404,6 +558,50 @@ export function DashboardClient({
   useEffect(() => {
     loadEpisodeAudioRef.current = loadEpisodeAudio;
   });
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    const action = reviewAudioSyncAction({
+      isReview: view === "review",
+      episodeId: reviewEpisode?.id ?? null,
+      variantId: selectedAudioVariant?.id ?? "canonical",
+      audioUrl: reviewPlaybackEpisode?.audioUrl ?? null,
+      loadedEpisodeId: audio?.dataset.episodeId ?? null,
+      loadedVariantId: audio?.dataset.variantId ?? null,
+      loadedAudioUrl: audio?.getAttribute("src") ?? null,
+    });
+    if (action === "load" && reviewPlaybackEpisode) {
+      loadEpisodeAudioRef.current(
+        reviewPlaybackEpisode,
+        selectedAudioVariant?.id ?? "canonical",
+      );
+      return;
+    }
+    if (action !== "clear") return;
+
+    if (audio) {
+      audio.pause();
+      audio.onloadedmetadata = null;
+      audio.ondurationchange = null;
+      audio.oncanplay = null;
+      audio.onplaying = null;
+      audio.onplay = null;
+      audio.onpause = null;
+      audio.ontimeupdate = null;
+      audio.onseeked = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.removeAttribute("src");
+      delete audio.dataset.episodeId;
+      delete audio.dataset.variantId;
+      audio.load();
+    }
+    pendingSeekRef.current = null;
+    setPlayingId(null);
+    updatePlaybackPosition(0);
+    setPlaybackDuration(0);
+    setAudioStatus("missing");
+  }, [view, reviewEpisode?.id, reviewPlaybackEpisode, selectedAudioVariant?.id]);
 
   useEffect(() => {
     const syncViewFromHistory = () => {
@@ -429,15 +627,24 @@ export function DashboardClient({
           window.scrollTo({ top: 0 });
           return;
         }
+        const variant = selectedVariantForEpisode(episode, null);
+        const playbackEpisode = episodeWithAudioVariant(episode, variant);
         setSelectedEpisodeId(route.episodeId);
+        setSelectedAudioVariantId(variant?.id ?? null);
         setReviewReturnView(route.reviewReturnView ?? "dashboard");
-        setAudioStatus(episode.audioUrl ? "loading" : "missing");
+        setAudioStatus(playbackEpisode.audioUrl ? "loading" : "missing");
         if (audio) {
           audio.removeAttribute("src");
           delete audio.dataset.episodeId;
+          delete audio.dataset.variantId;
           audio.load();
         }
-        if (episode.audioUrl) loadEpisodeAudioRef.current(episode);
+        if (playbackEpisode.audioUrl) {
+          loadEpisodeAudioRef.current(
+            playbackEpisode,
+            variant?.id ?? "canonical",
+          );
+        }
       }
 
       setView(route.view);
@@ -448,12 +655,15 @@ export function DashboardClient({
     return () => window.removeEventListener("popstate", syncViewFromHistory);
   }, [state.episodes]);
 
-  const previewEpisode = (episode: Episode) => {
+  const previewEpisode = (
+    episode: Episode,
+    variantId = episode.defaultAudioVariantId ?? "canonical",
+  ) => {
     if (!episode.audioUrl) {
       notify("This run has no audio file. Generate audio from the Review page.");
       return;
     }
-    const audio = loadEpisodeAudio(episode);
+    const audio = loadEpisodeAudio(episode, variantId);
     if (!audio) return;
     if (!audio.paused) {
       audio.pause();
@@ -464,22 +674,31 @@ export function DashboardClient({
     );
   };
 
-  const seekEpisode = (episode: Episode, delta: number) => {
+  const seekEpisode = (
+    episode: Episode,
+    delta: number,
+    variantId = episode.defaultAudioVariantId ?? "canonical",
+  ) => {
     if (!episode.audioUrl) return;
     const pending = pendingSeekRef.current;
     const currentSeconds =
-      pending?.episodeId === episode.id
+      pending?.episodeId === episode.id && pending.variantId === variantId
         ? pending.seconds
-        : audioRef.current?.dataset.episodeId === episode.id
+        : audioRef.current?.dataset.episodeId === episode.id &&
+            audioRef.current.dataset.variantId === variantId
           ? audioRef.current.currentTime
           : playbackSeconds;
-    seekEpisodeTo(episode, currentSeconds + delta);
+    seekEpisodeTo(episode, currentSeconds + delta, variantId);
   };
 
-  const seekEpisodeTo = (episode: Episode, seconds: number) => {
+  const seekEpisodeTo = (
+    episode: Episode,
+    seconds: number,
+    variantId = episode.defaultAudioVariantId ?? "canonical",
+  ) => {
     if (!episode.audioUrl) return;
 
-    const audio = loadEpisodeAudio(episode);
+    const audio = loadEpisodeAudio(episode, variantId);
     const duration =
       audio && Number.isFinite(audio.duration) && audio.duration > 0
         ? audio.duration
@@ -490,7 +709,11 @@ export function DashboardClient({
       return;
     }
 
-    pendingSeekRef.current = { episodeId: episode.id, seconds: target };
+    pendingSeekRef.current = {
+      episodeId: episode.id,
+      variantId,
+      seconds: target,
+    };
     if (audio.readyState >= 1) {
       try {
         if (Math.abs(audio.currentTime - target) < 0.25) {
@@ -515,13 +738,104 @@ export function DashboardClient({
     }
   };
 
-  const editEpisode = async (episodeId: string, script: string) => {
-    const payload = await requestJson<{ state: DashboardState }>(`/api/episodes/${encodeURIComponent(episodeId)}`, {
-      method: "PATCH",
-      body: JSON.stringify({ script, transcript: script }),
-    });
-    setState(payload.state);
-    notify("Transcript saved.");
+  const changeReviewAudioVariant = (variantId: string) => {
+    if (!reviewEpisode) return;
+    const variant = (reviewEpisode.audioVariants ?? []).find(
+      (candidate) => candidate.id === variantId,
+    );
+    if (!variant?.audioUrl) return;
+
+    const previousDuration =
+      playbackDuration ||
+      selectedAudioVariant?.durationSeconds ||
+      reviewEpisode.durationSeconds;
+    const normalizedPosition = previousDuration > 0
+      ? playbackSeconds / previousDuration
+      : 0;
+    const targetSeconds = clampPlaybackSeconds(
+      normalizedPosition * variant.durationSeconds,
+      variant.durationSeconds,
+    );
+    const shouldResume = Boolean(
+      audioRef.current &&
+      !audioRef.current.paused &&
+      playingId === reviewEpisode.id,
+    );
+
+    setSelectedAudioVariantId(variant.id);
+    pendingSeekRef.current = {
+      episodeId: reviewEpisode.id,
+      variantId: variant.id,
+      seconds: targetSeconds,
+    };
+    const audio = loadEpisodeAudio(
+      episodeWithAudioVariant(reviewEpisode, variant),
+      variant.id,
+    );
+    if (shouldResume && audio) {
+      void audio.play().catch(() =>
+        notify("The selected voice is ready. Press play to continue."),
+      );
+    }
+  };
+
+  const setDefaultAudioVariant = async (
+    episodeId: string,
+    audioVariantId: string,
+  ) => {
+    setBusy(`audio-default:${episodeId}`);
+    try {
+      const payload = await requestJson<{ state: DashboardState }>(
+        `/api/episodes/${encodeURIComponent(episodeId)}/audio`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ audioVariantId }),
+        },
+      );
+      setState(payload.state);
+      notify("Publish default updated. Public playback will use this voice.");
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Unable to update the publish default.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const editEpisode = async (
+    episodeId: string,
+    draft: Pick<Episode, "title" | "dek" | "script">,
+  ): Promise<boolean> => {
+    setBusy(`edit:${episodeId}`);
+    try {
+      const payload = await requestJson<{ state: DashboardState }>(
+        `/api/episodes/${encodeURIComponent(episodeId)}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(draft),
+        },
+      );
+      setState(payload.state);
+      const updatedEpisode = payload.state.episodes.find(
+        (episode) => episode.id === episodeId,
+      );
+      notify(
+        updatedEpisode?.generationWarning === "length_below_target"
+          ? "Draft saved. The transcript still runs short of the selected episode length."
+          : updatedEpisode?.generationWarning
+          ? "Draft saved. The title still needs review."
+          : "Draft saved and title alignment verified.",
+      );
+      return true;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to save the draft.");
+      return false;
+    } finally {
+      setBusy(null);
+    }
   };
 
   const generateLinkedInPost = async (
@@ -588,33 +902,58 @@ export function DashboardClient({
     }
   };
 
-  const regenerateEpisodeAudio = async (episodeId: string) => {
-    const hadAudio = Boolean(
-      state.episodes.find((episode) => episode.id === episodeId)?.audioUrl,
+  const regenerateEpisodeAudio = async (
+    episodeId: string,
+    voiceId: string | null,
+  ) => {
+    const currentEpisode = state.episodes.find(
+      (episode) => episode.id === episodeId,
+    );
+    const hadAudio = Boolean(reviewPlaybackEpisode?.audioUrl ?? currentEpisode?.audioUrl);
+    const selectedVoice = state.voiceProfiles.find(
+      (voice) => voice.id === voiceId,
+    );
+    const hadSelectedVoiceVariant = Boolean(
+      currentEpisode?.audioVariants?.some(
+        (variant) => variant.voiceId === voiceId,
+      ),
     );
     setBusy(`audio:${episodeId}`);
-    setAudioStatus("loading");
+    if (!hadAudio) setAudioStatus("loading");
     try {
       const payload = await requestJson<{
         episode: Episode;
         state: DashboardState;
+        audioVariantId: string;
       }>(`/api/episodes/${encodeURIComponent(episodeId)}/audio`, {
         method: "POST",
+        body: voiceId ? JSON.stringify({ voiceId }) : undefined,
       });
       const generated = reconcileGeneratedEpisode(
         payload.state,
         payload.episode,
       );
       requireGeneratedAudio(generated.episode, true);
+      const generatedVariant = generated.episode.audioVariants?.find(
+        (variant) => variant.id === payload.audioVariantId,
+      );
+      if (!generatedVariant?.audioUrl) {
+        throw new Error("The generated voice version could not be loaded.");
+      }
       setState(generated.state);
-      loadEpisodeAudio(generated.episode);
+      setSelectedAudioVariantId(generatedVariant.id);
+      pendingSeekRef.current = null;
+      loadEpisodeAudio(
+        episodeWithAudioVariant(generated.episode, generatedVariant),
+        generatedVariant.id,
+      );
       notify(
-        hadAudio
-          ? "Audio regenerated with the selected local narrator."
-          : "Audio generated with the selected local narrator.",
+        hadSelectedVoiceVariant
+          ? `${selectedVoice?.name ?? "The selected narrator"} audio was regenerated.`
+          : `${selectedVoice?.name ?? "The selected narrator"} was added as a voice version.`,
       );
     } catch (error) {
-      setAudioStatus(hadAudio ? "error" : "missing");
+      if (!hadAudio) setAudioStatus("missing");
       notify(error instanceof Error ? error.message : "Unable to regenerate audio.");
     } finally {
       setBusy(null);
@@ -828,7 +1167,13 @@ export function DashboardClient({
                   : "Dashboard"
             }
             onBack={() => navigate(reviewReturnView)}
-            onApprove={() => void approveEpisode(reviewEpisode.id)}
+            onApprove={(overrideTitleWarning) =>
+              void approveEpisode(
+                reviewEpisode.id,
+                overrideTitleWarning,
+                reviewEpisode.defaultAudioVariantId ?? null,
+              )
+            }
             canEdit={canEdit}
             canPublish={canPublish}
             user={user}
@@ -840,18 +1185,48 @@ export function DashboardClient({
                 { episode: reviewEpisode, currentDraft },
               )
             }
-            onPreview={() => previewEpisode(reviewEpisode)}
-            onSeek={(delta) => seekEpisode(reviewEpisode, delta)}
-            onSeekTo={(seconds) => seekEpisodeTo(reviewEpisode, seconds)}
+            onPreview={() =>
+              reviewPlaybackEpisode &&
+              previewEpisode(
+                reviewPlaybackEpisode,
+                selectedAudioVariant?.id ?? "canonical",
+              )
+            }
+            onSeek={(delta) =>
+              reviewPlaybackEpisode &&
+              seekEpisode(
+                reviewPlaybackEpisode,
+                delta,
+                selectedAudioVariant?.id ?? "canonical",
+              )
+            }
+            onSeekTo={(seconds) =>
+              reviewPlaybackEpisode &&
+              seekEpisodeTo(
+                reviewPlaybackEpisode,
+                seconds,
+                selectedAudioVariant?.id ?? "canonical",
+              )
+            }
             onPlaybackRateChange={changePlaybackRate}
-            onEdit={(script) => void editEpisode(reviewEpisode.id, script)}
+            onEdit={(draft) => editEpisode(reviewEpisode.id, draft)}
             onGenerateLinkedInPost={() =>
               generateLinkedInPost(reviewEpisode.id)
             }
             onSaveLinkedInPost={(post) =>
               saveLinkedInPost(reviewEpisode.id, post)
             }
-            onRegenerateAudio={() => void regenerateEpisodeAudio(reviewEpisode.id)}
+            onRegenerateAudio={(voiceId) =>
+              void regenerateEpisodeAudio(reviewEpisode.id, voiceId)
+            }
+            selectedAudioVariant={selectedAudioVariant}
+            onAudioVariantChange={changeReviewAudioVariant}
+            onSetDefaultAudioVariant={(audioVariantId) =>
+              void setDefaultAudioVariant(
+                reviewEpisode.id,
+                audioVariantId,
+              )
+            }
             onExport={() => exportEpisode(reviewEpisode)}
             onNotify={notify}
             busy={busy}
@@ -864,6 +1239,7 @@ export function DashboardClient({
             onStart={(itemIds, episodeLength) => void generateEpisode("daily_digest", itemIds, episodeLength)}
             onAddSource={() => setModal("source")}
             busy={busy}
+            sourceLimit={generationSourceLimit}
           />
         )}
       </OrganicAppShell>

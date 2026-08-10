@@ -2,10 +2,22 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 import { JSDOM } from "jsdom";
 import { fetchFeed } from "./lib/rss";
+import { safeFetchBytes } from "./lib/source-extraction/safe-http";
 
 const env = fs.readFileSync(".env.local", "utf8");
-const supabaseUrl = env.match(/NEXT_PUBLIC_SUPABASE_URL=(.*)/)?.[1]?.trim()!;
-const supabaseKey = env.match(/SUPABASE_SERVICE_ROLE_KEY=(.*)/)?.[1]?.trim()!;
+
+function requireEnvValue(name: string): string {
+  const value = env.match(new RegExp(`^${name}=(.*)$`, "m"))?.[1]?.trim();
+  if (!value) throw new Error(`Missing ${name} in .env.local`);
+  return value;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+const supabaseUrl = requireEnvValue("NEXT_PUBLIC_SUPABASE_URL");
+const supabaseKey = requireEnvValue("SUPABASE_SERVICE_ROLE_KEY");
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 async function check() {
@@ -22,8 +34,9 @@ async function check() {
     try {
       await fetchFeed(source.url);
       isWorking = true;
-    } catch (e: any) {
-      if (e.message.includes("larger than the 2 MB") || e.message.includes("429")) {
+    } catch (error: unknown) {
+      const message = errorMessage(error);
+      if (message.includes("larger than the 2 MB") || message.includes("429")) {
         isWorking = true; // URL is correct, just rate limited or too large
       }
     }
@@ -39,18 +52,19 @@ async function check() {
         
         // Try to fetch the base path and look for <link rel="alternate">
         try {
-          const res = await fetch(basePath, {
-             headers: { "User-Agent": "Mozilla/5.0 (compatible; KernelZero/1.0)" }
+          const res = await safeFetchBytes(basePath, {
+            allowedMediaTypes: ["html"],
+            userAgent: "Mozilla/5.0 (compatible; KernelZero/1.0)",
           });
-          if (res.ok) {
-            const html = await res.text();
+          if (res.status >= 200 && res.status < 300) {
+            const html = new TextDecoder().decode(res.body);
             const doc = new JSDOM(html, { url: basePath });
-            const links = doc.window.document.querySelectorAll('link[rel="alternate"][type="application/rss+xml"], link[rel="alternate"][type="application/atom+xml"]');
+            const links = doc.window.document.querySelectorAll<HTMLLinkElement>('link[rel="alternate"][type="application/rss+xml"], link[rel="alternate"][type="application/atom+xml"]');
             for (const link of links) {
-               testUrls.add((link as any).href);
+               testUrls.add(link.href);
             }
           }
-        } catch (e) {}
+        } catch {}
 
         // Add some common fallbacks
         testUrls.add(urlObj.origin + "/rss");
@@ -82,15 +96,15 @@ async function check() {
               await supabase.from("sources").update({ url: testUrl }).eq("id", source.id);
               found = true;
               break;
-           } catch (e: any) {
+           } catch {
               // Ignore
            }
         }
         if (!found) {
            console.log(`  -> Could not find valid feed.`);
         }
-      } catch (e) {
-         console.log(`  -> Error fixing: ${e}`);
+      } catch (error: unknown) {
+         console.log(`  -> Error fixing: ${errorMessage(error)}`);
       }
     }
   }

@@ -1,6 +1,7 @@
 import { authErrorResponse, currentOwner } from "../../../../../lib/auth";
 import { scoreCandidate } from "../../../../../lib/domain";
 import { fetchFeed } from "../../../../../lib/rss";
+import { storeSourceDocuments } from "../../../../../lib/source-documents";
 import { addSource, getDashboardState, personalizeItems, upsertItems } from "../../../../../lib/store";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +20,7 @@ export async function POST(
     const parsed = await fetchFeed(source.url);
     const items = await personalizeItems(ownerId, parsed.items.map((candidate) => scoreCandidate({ ...candidate, sourceId: source.id, sourceName: source.name }, state.interests)));
     await upsertItems(ownerId, items);
+    await storeSourceDocuments(ownerId, parsed.documents);
     await addSource(ownerId, { ...source, lastSuccessfulFetch: new Date().toISOString() });
     return Response.json({ imported: items.length, state: await getDashboardState(ownerId) });
   } catch (error) {

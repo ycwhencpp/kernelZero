@@ -16,10 +16,12 @@ import {
   episodeLengthProfile,
   estimateScriptDurationSeconds,
   normalizeEpisodeLength,
+  scriptMatchesDegradedEpisodeLength,
   scriptMatchesEpisodeLength,
 } from "./podcast-length";
 import {
   normalizeEvidenceConfidence,
+  podcastClaimSourceIndex,
   podcastSchema,
   type PodcastDraft,
 } from "./podcast-schema";
@@ -41,7 +43,14 @@ import {
   removeAiProductionDisclosures,
   withPodcastHostStyle,
 } from "./podcast-style";
-import type { Citation, ContentItem, Episode, EpisodeLength, EvidenceClaim } from "./types";
+import type {
+  Citation,
+  ContentItem,
+  Episode,
+  EpisodeGenerationWarning,
+  EpisodeLength,
+  EvidenceClaim,
+} from "./types";
 import type { ActiveVoiceProfile } from "./store";
 import { parseModelJson } from "./model-json";
 import {
@@ -469,6 +478,9 @@ export async function generatePodcast(
     episodeLength?: EpisodeLength;
     regeneration?: PodcastRegenerationContext | null;
     episodeId?: string;
+    /** Hydrated, provenance-carrying corpus used only by the Ollama pipeline. */
+    sourceCorpus?: ollama.SemanticPodcastInput;
+    traceId?: string;
     onDraftReady?: (checkpoint: PodcastDraftCheckpoint) => Promise<void>;
   } = {},
 ): Promise<PodcastPackage> {
@@ -479,92 +491,115 @@ export async function generatePodcast(
   if (
     options.includeAudio &&
     process.env.REQUIRE_LOCAL_VOICE === "true" &&
-    (!options.voiceProfile?.active ||
-      options.voiceProfile.provider !== "chatterbox")
+    options.voiceProfile?.provider !== "chatterbox"
   ) {
     throw new Error(
       "A local Chatterbox voice is required before generating audio.",
     );
   }
-  let generated =
-    provider === "gemini"
-      ? await gemini.createStructuredPodcast(
+  let generated: PodcastDraft;
+  let generationWarning: EpisodeGenerationWarning | null = null;
+  if (provider === "gemini") {
+    generated = await gemini.createStructuredPodcast(
+      items,
+      type,
+      episodeLength,
+      options.regeneration,
+    );
+  } else if (provider === "ollama") {
+    const semantic = await ollama.createSemanticPodcast(
+      options.sourceCorpus ?? items,
+      type,
+      episodeLength,
+      {
+        traceId: options.traceId,
+        regenerationFeedback: options.regeneration
+          ? [
+              "Create a meaningfully revised structure from the source corpus.",
+              "Treat the prior episode title as metadata only; do not use it to narrow or anchor the new transcript.",
+              "Preserve only source-supported substance and do not copy prior draft prose.",
+            ]
+          : undefined,
+      },
+    );
+    generated = semantic;
+    generationWarning = semantic.generationWarning;
+  } else {
+    generated = await createStructuredPodcast(
+      items,
+      type,
+      episodeLength,
+      options.regeneration,
+    );
+  }
+
+  // Semantic Ollama owns all transcript mutations and creates metadata last.
+  // Keep the existing resize and repair sequence unchanged for other providers.
+  if (provider !== "ollama") {
+    generated = {
+      ...generated,
+      script: removeAiProductionDisclosures(generated.script),
+    };
+
+    // Verification can shorten a repaired draft, so re-check duration after
+    // each evidence pass. A too-short script is never persisted or sent to TTS.
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      generated = await enforceEpisodeLength(provider, generated, items, type, episodeLength);
+      generated = await runEvidenceVerification(provider, generated, items, type, episodeLength);
+      generated = {
+        ...generated,
+        script: removeAiProductionDisclosures(generated.script),
+      };
+      const repetitionIssues = findRepeatedParagraphs(generated.script);
+      const styleFailure = podcastStyleFailureMessage(generated.script);
+      if (
+        scriptMatchesEpisodeLength(generated.script, episodeLength) &&
+        repetitionIssues.length === 0 &&
+        styleFailure === null
+      ) {
+        break;
+      }
+      if (repetitionIssues.length || styleFailure) {
+        const narrativeFailure = [
+          repetitionIssues.length
+            ? repetitionFailureMessage(repetitionIssues)
+            : null,
+          styleFailure,
+        ]
+          .filter((failure): failure is string => Boolean(failure))
+          .join("\n");
+        if (cycle >= 2) {
+          throw new Error(narrativeFailure);
+        }
+        generated = await repairNarrativeIssues(
+          provider,
+          generated,
           items,
+          narrativeFailure,
           type,
           episodeLength,
-          options.regeneration,
-        )
-      : provider === "ollama"
-        ? await ollama.createStructuredPodcast(
-            items,
-            type,
-            episodeLength,
-            [],
-            options.regeneration,
-          )
-        : await createStructuredPodcast(
-            items,
-            type,
-            episodeLength,
-            options.regeneration,
-          );
-  generated = {
-    ...generated,
-    script: removeAiProductionDisclosures(generated.script),
-  };
-
-  // Verification can shorten a repaired draft, so re-check duration after each
-  // evidence pass. A too-short script is never persisted or sent to TTS.
-  for (let cycle = 0; cycle < 3; cycle += 1) {
-    generated = await enforceEpisodeLength(provider, generated, items, type, episodeLength);
-    if (provider !== "ollama") {
-      generated = await runEvidenceVerification(provider, generated, items, type, episodeLength);
+        );
+        generated = {
+          ...generated,
+          script: removeAiProductionDisclosures(generated.script),
+        };
+      }
     }
     generated = {
       ...generated,
       script: removeAiProductionDisclosures(generated.script),
     };
-    const repetitionIssues = findRepeatedParagraphs(generated.script);
-    const styleFailure = podcastStyleFailureMessage(generated.script);
-    if (
-      scriptMatchesEpisodeLength(generated.script, episodeLength) &&
-      repetitionIssues.length === 0 &&
-      styleFailure === null
-    ) {
-      break;
-    }
-    if (repetitionIssues.length || styleFailure) {
-      const narrativeFailure = [
-        repetitionIssues.length
-          ? repetitionFailureMessage(repetitionIssues)
-          : null,
-        styleFailure,
-      ]
-        .filter((failure): failure is string => Boolean(failure))
-        .join("\n");
-      if (cycle >= 2) {
-        throw new Error(narrativeFailure);
-      }
-      generated = await repairNarrativeIssues(
-        provider,
-        generated,
-        items,
-        narrativeFailure,
-        type,
-        episodeLength,
-      );
-      generated = {
-        ...generated,
-        script: removeAiProductionDisclosures(generated.script),
-      };
-    }
   }
-  generated = {
-    ...generated,
-    script: removeAiProductionDisclosures(generated.script),
-  };
-  if (!scriptMatchesEpisodeLength(generated.script, episodeLength)) {
-    throw new Error("Evidence repair could not preserve the selected episode duration.");
+  // The semantic pipeline already exhausted its bounded length passes and
+  // labelled a near-miss transcript for review, so honour that decision here
+  // instead of discarding the run.
+  const keepsWarnedLength = generationWarning === "length_below_target" &&
+    scriptMatchesDegradedEpisodeLength(generated.script, episodeLength);
+  if (
+    !keepsWarnedLength &&
+    !scriptMatchesEpisodeLength(generated.script, episodeLength)
+  ) {
+    throw new Error("The final transcript does not satisfy the selected episode duration.");
   }
   const remainingRepetition = findRepeatedParagraphs(generated.script);
   if (remainingRepetition.length) {
@@ -586,16 +621,19 @@ export async function generatePodcast(
   const estimatedDurationSeconds = estimateScriptDurationSeconds(generated.script);
   let durationSeconds = estimatedDurationSeconds;
   let chapters = generated.chapters;
-  const evidence: EvidenceClaim[] = generated.claims.map((claim, index) => ({
-    id: `evidence-${crypto.randomUUID()}`,
-    episodeId,
-    contentItemId: items[Math.min(index, items.length - 1)].id,
-    claim: claim.claim,
-    support: claim.support,
-    sourceUrl: items[Math.min(index, items.length - 1)].canonicalUrl,
-    confidence: normalizeEvidenceConfidence(claim.confidence),
-    location: claim.location,
-  }));
+  const evidence: EvidenceClaim[] = generated.claims.map((claim, index) => {
+    const sourceIndex = podcastClaimSourceIndex(claim, index, items.length);
+    return {
+      id: `evidence-${crypto.randomUUID()}`,
+      episodeId,
+      contentItemId: items[sourceIndex].id,
+      claim: claim.claim,
+      support: claim.support,
+      sourceUrl: items[sourceIndex].canonicalUrl,
+      confidence: normalizeEvidenceConfidence(claim.confidence),
+      location: claim.location,
+    };
+  });
   const episode: Episode = {
     id: episodeId,
     contentItemId: type === "daily_digest" ? undefined : items[0].id,
@@ -605,6 +643,7 @@ export async function generatePodcast(
     script: generated.script,
     showNotes: generated.showNotes,
     transcript: generated.script,
+    generationWarning,
     citations,
     chapters,
     audioUrl: null,
@@ -662,7 +701,7 @@ export async function synthesizePodcastAudio(
   voiceProfile: ActiveVoiceProfile | null | undefined,
   targetDurationSeconds = estimateScriptDurationSeconds(script),
 ): Promise<PodcastAudioResult> {
-  if (voiceProfile?.active && voiceProfile.provider === "chatterbox") {
+  if (voiceProfile?.provider === "chatterbox") {
     const speech = await synthesizeChatterboxSpeechWithMetadata(
       script,
       voiceProfile.sampleKey,

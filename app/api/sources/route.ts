@@ -1,6 +1,7 @@
 import { authErrorResponse, currentOwner } from "../../../lib/auth";
 import { scoreCandidate } from "../../../lib/domain";
 import { fetchFeed, simpleHash } from "../../../lib/rss";
+import { storeSourceDocuments } from "../../../lib/source-documents";
 import {
   addSource,
   getDashboardState,
@@ -56,6 +57,7 @@ export async function POST(request: Request) {
     const personalized = await personalizeItems(ownerId, items);
     await addSource(ownerId, source);
     await upsertItems(ownerId, personalized);
+    await storeSourceDocuments(ownerId, parsed.documents);
     return Response.json({
       source,
       imported: personalized.length,

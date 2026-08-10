@@ -1,9 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import type { AppUser, DashboardState, Episode } from "../../lib/types";
+import type {
+  AppUser,
+  DashboardState,
+  Episode,
+  EpisodeAudioVariant,
+} from "../../lib/types";
 import { formatDuration } from "../../lib/domain";
 import { PLAYBACK_RATE_OPTIONS } from "../../lib/playback";
+import {
+  mapTranscriptParagraphsToChapters,
+  transcriptParagraphs,
+} from "../../lib/chapter-mapping";
+import {
+  resolveReviewVoiceId,
+  reviewAudioButtonLabel,
+} from "../../lib/review-audio-state";
 import {
   linkedInPostEditorDraft,
   resolveLinkedInPostEditorValue,
@@ -43,6 +56,9 @@ export function OrganicReviewView({
   onGenerateLinkedInPost,
   onSaveLinkedInPost,
   onRegenerateAudio,
+  selectedAudioVariant,
+  onAudioVariantChange,
+  onSetDefaultAudioVariant,
   onExport,
   onNotify,
   busy,
@@ -59,16 +75,19 @@ export function OrganicReviewView({
   audioStatus: "missing" | "loading" | "ready" | "error";
   backLabel: string;
   onBack: () => void;
-  onApprove: () => void;
+  onApprove: (overrideTitleWarning?: boolean) => void;
   onRegenerateDraft: (currentDraft: string) => void;
   onPreview: () => void;
   onSeek: (seconds: number) => void;
   onSeekTo: (seconds: number) => void;
   onPlaybackRateChange: (rate: number) => void;
-  onEdit: (script: string) => void;
+  onEdit: (draft: Pick<Episode, "title" | "dek" | "script">) => Promise<boolean>;
   onGenerateLinkedInPost: () => Promise<string | null>;
   onSaveLinkedInPost: (post: string) => Promise<string | null>;
-  onRegenerateAudio: () => void;
+  onRegenerateAudio: (voiceId: string | null) => void;
+  selectedAudioVariant: EpisodeAudioVariant | null;
+  onAudioVariantChange: (id: string) => void;
+  onSetDefaultAudioVariant: (id: string) => void;
   onExport: () => void;
   onNotify: (message: string) => void;
   busy: string | null;
@@ -78,7 +97,9 @@ export function OrganicReviewView({
 }) {
   const evidence = state.evidence.filter((claim) => claim.episodeId === episode.id);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(episode.script);
+  const [titleDraft, setTitleDraft] = useState(episode.title);
+  const [dekDraft, setDekDraft] = useState(episode.dek);
+  const [scriptDraft, setScriptDraft] = useState(episode.script);
   const persistedLinkedInPost = episode.linkedInPost ?? null;
   const [linkedInDraft, setLinkedInDraft] = useState(() =>
     linkedInPostEditorDraft(episode.id, persistedLinkedInPost),
@@ -114,28 +135,79 @@ export function OrganicReviewView({
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">(
     "idle",
   );
-  const paragraphs = episode.script.split(/\n{2,}/).filter(Boolean);
-  const hasAudio = Boolean(episode.audioUrl);
+  const [preferredVoiceId, setPreferredVoiceId] = useState<string | null>(
+    () => state.voiceProfile?.id ?? state.voiceProfiles[0]?.id ?? null,
+  );
+  const selectedVoiceId = resolveReviewVoiceId(
+    state.voiceProfiles,
+    preferredVoiceId,
+  );
+  const audioVariants = episode.audioVariants ?? [];
+  const defaultAudioVariant =
+    audioVariants.find(
+      (variant) => variant.id === episode.defaultAudioVariantId,
+    ) ??
+    audioVariants.find((variant) => variant.isDefault) ??
+    null;
+  const activeAudioVariant =
+    (selectedAudioVariant &&
+    audioVariants.some((variant) => variant.id === selectedAudioVariant.id)
+      ? selectedAudioVariant
+      : null) ??
+    defaultAudioVariant ??
+    audioVariants[0] ??
+    null;
+  const selectedNarrator = state.voiceProfiles.find(
+    (voice) => voice.id === selectedVoiceId,
+  );
+  const selectedNarratorVariant = audioVariants.find(
+    (variant) => variant.voiceId === selectedVoiceId,
+  );
+  const selectedNarratorName =
+    selectedNarrator?.name ??
+    selectedNarratorVariant?.voiceName ??
+    "system voice";
+  const audioGenerationBusy = busy === `audio:${episode.id}`;
+  const selectedVariantIsDefault = Boolean(
+    activeAudioVariant &&
+      (activeAudioVariant.id === defaultAudioVariant?.id ||
+        activeAudioVariant.isDefault),
+  );
+  const transcriptParts = transcriptParagraphs(episode.script);
+  const sourceDurationSeconds =
+    activeAudioVariant?.durationSeconds ?? episode.durationSeconds;
+  const sourceChapters = activeAudioVariant?.chapters?.length
+    ? activeAudioVariant.chapters
+    : episode.chapters;
+  const hasAudio = Boolean(activeAudioVariant?.audioUrl ?? episode.audioUrl);
   const audioReady = hasAudio && audioStatus === "ready";
+  const audioPreparing = audioStatus === "loading" ||
+    (hasAudio && audioStatus === "missing");
   const duration = audioReady ? Math.max(1, playbackDuration) : 0;
-  const rawChapters = episode.chapters.length
-    ? episode.chapters
-    : paragraphs.map((_, index) => ({
+  const rawChapters = sourceChapters.length
+    ? sourceChapters
+    : transcriptParts.map((paragraph, index) => ({
         title: `Section ${index + 1}`,
         startSeconds: Math.round(
-          (episode.durationSeconds * index) / Math.max(1, paragraphs.length),
+          (sourceDurationSeconds * index) /
+            Math.max(1, transcriptParts.length),
         ),
+        scriptStart: paragraph.scriptStart,
       }));
   const chapterScale = audioReady
-    ? duration / Math.max(1, episode.durationSeconds)
+    ? duration / Math.max(1, sourceDurationSeconds)
     : 1;
   const chapters = rawChapters.map((chapter) => ({
     ...chapter,
     startSeconds: Math.min(
-      duration || episode.durationSeconds,
+      duration || sourceDurationSeconds,
       chapter.startSeconds * chapterScale,
     ),
   }));
+  const paragraphs = mapTranscriptParagraphsToChapters(
+    episode.script,
+    rawChapters,
+  );
   const activeChapterIndex = chapters.reduce(
     (active, chapter, index) =>
       playbackSeconds >= chapter.startSeconds ? index : active,
@@ -145,6 +217,11 @@ export function OrganicReviewView({
     canEdit &&
     (episode.status === "needs_approval" || episode.status === "draft");
   const canApprove = canPublish && episode.status === "needs_approval";
+  const hasTitleValidationWarning =
+    episode.generationWarning === "title_validation_failed";
+  const hasLengthWarning = episode.generationWarning === "length_below_target";
+  const hasGenerationWarning = episode.generationWarning !== null &&
+    episode.generationWarning !== undefined;
   const linkedInBusy = busy === `linkedin:${episode.id}`;
   const linkedInSaving = busy === `linkedin-save:${episode.id}`;
   const linkedInDirty =
@@ -223,8 +300,41 @@ export function OrganicReviewView({
       0,
     );
     document
-      .getElementById(`review-section-${chapterIndex}`)
+      .getElementById(
+        `review-section-${Math.max(
+          0,
+          paragraphs.findIndex(
+            (paragraph) => paragraph.chapterIndex === chapterIndex,
+          ),
+        )}`,
+      )
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+  const resetDraft = () => {
+    setTitleDraft(episode.title);
+    setDekDraft(episode.dek);
+    setScriptDraft(episode.script);
+  };
+  const toggleEditing = () => {
+    resetDraft();
+    setEditing((value) => !value);
+  };
+  const saveDraft = async () => {
+    const saved = await onEdit({
+      title: titleDraft.trim(),
+      dek: dekDraft.trim(),
+      script: scriptDraft,
+    });
+    if (saved) setEditing(false);
+  };
+  const approve = () => {
+    const confirmation = hasTitleValidationWarning
+      ? "The title still does not pass transcript-alignment validation. Publish this episode anyway?"
+      : hasLengthWarning
+        ? "This transcript is shorter than the selected episode length. Publish this episode anyway?"
+        : null;
+    if (confirmation && !window.confirm(confirmation)) return;
+    onApprove(hasGenerationWarning);
   };
 
   return (
@@ -251,12 +361,57 @@ export function OrganicReviewView({
         <p className="organic-eyebrow">
           EPISODE #{episode.generation} • {titleCase(episode.type)}
         </p>
-        <h1>{episode.title}</h1>
+        {editing ? (
+          <div className="organic-review-metadata-editor">
+            <label htmlFor="review-episode-title">
+              <span>Episode title</span>
+              <input
+                id="review-episode-title"
+                value={titleDraft}
+                onChange={(event) => setTitleDraft(event.target.value)}
+                maxLength={500}
+              />
+            </label>
+            <label htmlFor="review-episode-dek">
+              <span>Episode summary</span>
+              <textarea
+                id="review-episode-dek"
+                value={dekDraft}
+                onChange={(event) => setDekDraft(event.target.value)}
+                rows={3}
+              />
+            </label>
+          </div>
+        ) : (
+          <>
+            <h1>{episode.title}</h1>
+            {episode.dek && <p className="organic-review-dek">{episode.dek}</p>}
+          </>
+        )}
+        {hasTitleValidationWarning && (
+          <aside className="organic-review-warning" role="alert">
+            <strong>Title needs review</strong>
+            <p>
+              The generated title did not pass transcript-alignment validation.
+              Edit the title or transcript and save to recheck it before publishing.
+            </p>
+          </aside>
+        )}
+        {hasLengthWarning && (
+          <aside className="organic-review-warning" role="alert">
+            <strong>Transcript runs short</strong>
+            <p>
+              The generation passes could not reach the selected episode length.
+              Extend the transcript with source-backed detail and save to recheck
+              it, or publish the shorter episode deliberately.
+            </p>
+          </aside>
+        )}
         <div className="organic-review-stats">
           <span>
             {audioReady
               ? `${formatDuration(duration)} audio`
-              : audioStatus === "loading"
+              : audioPreparing
                 ? "Preparing audio"
                 : audioStatus === "error"
                   ? "Audio unavailable"
@@ -270,17 +425,52 @@ export function OrganicReviewView({
             type="button"
             className="organic-btn organic-btn-outline"
             disabled={busy !== null}
-            onClick={() => onRegenerateDraft(editing ? draft : episode.script)}
+            onClick={() => onRegenerateDraft(editing ? scriptDraft : episode.script)}
           >
             Regenerate Draft
           </button>
-          <button type="button" className="organic-btn organic-btn-outline" disabled={busy !== null || audioStatus === "loading"} onClick={onRegenerateAudio}>
-            {audioStatus === "loading"
-              ? "Generating Audio..."
-              : hasAudio
-                ? "Regenerate Audio"
-                : "Generate Audio"}
-          </button>
+          <div className="organic-review-audio-control">
+            <label
+              className="organic-review-voice-picker"
+              htmlFor="review-audio-voice"
+            >
+              <span>Voice for regeneration</span>
+              <select
+                id="review-audio-voice"
+                value={selectedVoiceId ?? ""}
+                disabled={
+                  busy !== null ||
+                  state.voiceProfiles.length === 0
+                }
+                onChange={(event) =>
+                  setPreferredVoiceId(event.target.value || null)
+                }
+              >
+                {state.voiceProfiles.length === 0 ? (
+                  <option value="">Configured system voice</option>
+                ) : (
+                  state.voiceProfiles.map((voice) => (
+                    <option key={voice.id} value={voice.id}>
+                      {voice.name}{voice.active ? " (primary)" : ""}
+                    </option>
+                  ))
+                )}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="organic-btn organic-btn-outline"
+              disabled={busy !== null}
+              aria-busy={audioGenerationBusy}
+              onClick={() => onRegenerateAudio(selectedVoiceId)}
+            >
+              {audioGenerationBusy
+                ? "Generating voice…"
+                : selectedNarratorVariant
+                  ? `Regenerate ${selectedNarratorName}`
+                  : "Add voice version"}
+            </button>
+          </div>
           {canEdit && (
             <button
               type="button"
@@ -297,9 +487,11 @@ export function OrganicReviewView({
               type="button"
               className="organic-btn organic-btn-lime"
               disabled={busy !== null}
-              onClick={onApprove}
+              onClick={approve}
             >
-              Approve and Publish
+              {hasGenerationWarning
+                ? "Publish with Warning"
+                : "Approve and Publish"}
             </button>
           ) : episode.status === "needs_approval" && !canPublish ? (
             <span className="organic-review-state">
@@ -447,28 +639,52 @@ export function OrganicReviewView({
           <div className="organic-panel-head">
             <h3>Transcript</h3>
             {canEditDraft && (
-              <button type="button" className="organic-text-link lime" onClick={() => { setDraft(episode.script); setEditing((value) => !value); }}>
-                {editing ? "Cancel Edit" : "Edit Text"}
+              <button
+                type="button"
+                className="organic-btn organic-btn-outline compact"
+                disabled={busy !== null}
+                aria-controls="review-transcript-content"
+                aria-expanded={editing}
+                onClick={toggleEditing}
+              >
+                {editing ? "Cancel editing" : "Edit transcript"}
               </button>
             )}
           </div>
           {editing ? (
-            <div className="organic-transcript-body">
-              <textarea className="organic-input" value={draft} onChange={(event) => setDraft(event.target.value)} rows={18} />
-              <button type="button" className="organic-btn organic-btn-dark" disabled={busy !== null || !draft.trim()} onClick={() => { onEdit(draft); setEditing(false); }}>Save Text</button>
+            <div
+              id="review-transcript-content"
+              className="organic-transcript-body"
+            >
+              <textarea className="organic-input" value={scriptDraft} onChange={(event) => setScriptDraft(event.target.value)} rows={18} />
+              <button
+                type="button"
+                className="organic-btn organic-btn-dark"
+                disabled={
+                  busy !== null || !titleDraft.trim() || !scriptDraft.trim()
+                }
+                onClick={() => void saveDraft()}
+              >
+                {busy === `edit:${episode.id}` ? "Saving…" : "Save Draft"}
+              </button>
             </div>
           ) : (
-            <div className="organic-transcript-body">
+            <div
+              id="review-transcript-content"
+              className="organic-transcript-body"
+            >
               {paragraphs.map((paragraph, index) => (
                 <section
                   id={`review-section-${index}`}
                   className={`organic-transcript-section ${
-                    index === activeChapterIndex ? "is-active" : ""
+                    paragraph.chapterIndex === activeChapterIndex ? "is-active" : ""
                   }`}
-                  key={`${index}-${paragraph.slice(0, 24)}`}
+                  key={`${paragraph.scriptStart}-${paragraph.text.slice(0, 24)}`}
                 >
-                  {chapters[index] && <h4>{chapters[index].title}</h4>}
-                  <p>{paragraph}</p>
+                  {paragraph.startsChapter && chapters[paragraph.chapterIndex] && (
+                    <h4>{chapters[paragraph.chapterIndex].title}</h4>
+                  )}
+                  <p>{paragraph.text}</p>
                 </section>
               ))}
               {!paragraphs.length && (
@@ -510,7 +726,7 @@ export function OrganicReviewView({
               <small>
                 {audioReady
                   ? chapters[activeChapterIndex]?.title ?? "Now reviewing"
-                  : audioStatus === "loading"
+                  : audioPreparing
                     ? "Generating or loading audio"
                     : audioStatus === "error"
                       ? "Audio unavailable"
@@ -519,51 +735,125 @@ export function OrganicReviewView({
             </span>
           </div>
           <div className="organic-player-controls">
-            {audioReady ? (
-              <>
-                <button type="button" aria-label="Back 10 seconds" onClick={() => onSeek(-10)}>
-                  -10
-                </button>
+            {audioVariants.length > 0 && activeAudioVariant && (
+              <div className="organic-player-version-controls">
+                {audioVariants.length > 1 ? (
+                  <label
+                    className="organic-player-variant-picker"
+                    htmlFor="review-playback-voice"
+                  >
+                    <span>Listen as</span>
+                    <select
+                      id="review-playback-voice"
+                      aria-label="Listen as voice"
+                      value={activeAudioVariant.id}
+                      onChange={(event) =>
+                        onAudioVariantChange(event.target.value)
+                      }
+                    >
+                      {audioVariants.map((variant) => (
+                        <option key={variant.id} value={variant.id}>
+                          {variant.voiceName}
+                          {variant.id === defaultAudioVariant?.id ||
+                          variant.isDefault
+                            ? " (default)"
+                            : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <div className="organic-player-voice-summary">
+                    <span>Voice</span>
+                    <strong>{activeAudioVariant.voiceName}</strong>
+                  </div>
+                )}
+                {canPublish ? (
+                  selectedVariantIsDefault ? (
+                    <span className="organic-player-default-state">
+                      Publish default
+                    </span>
+                  ) : episode.status === "published" ? (
+                    <span className="organic-player-default-state">
+                      Default locked after publishing
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="organic-player-default-action"
+                      disabled={busy !== null}
+                      onClick={() =>
+                        onSetDefaultAudioVariant(activeAudioVariant.id)
+                      }
+                    >
+                      Set as publish default
+                    </button>
+                  )
+                ) : (
+                  <span className="organic-player-default-state">
+                    {defaultAudioVariant
+                      ? `Default: ${defaultAudioVariant.voiceName}`
+                      : "Default not selected"}
+                  </span>
+                )}
+              </div>
+            )}
+            <div className="organic-player-transport">
+              {audioReady ? (
+                <>
+                  <button
+                    type="button"
+                    aria-label="Back 10 seconds"
+                    onClick={() => onSeek(-10)}
+                  >
+                    -10
+                  </button>
+                  <button
+                    type="button"
+                    className="organic-play"
+                    onClick={onPreview}
+                    aria-label={playingId === episode.id ? "Pause" : "Play"}
+                  >
+                    {playingId === episode.id ? "II" : "▶"}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Forward 10 seconds"
+                    onClick={() => onSeek(10)}
+                  >
+                    +10
+                  </button>
+                  <select
+                    className="organic-playback-rate"
+                    aria-label="Playback speed"
+                    value={playbackRate}
+                    onChange={(event) =>
+                      onPlaybackRateChange(Number(event.target.value))
+                    }
+                  >
+                    {PLAYBACK_RATE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : (
                 <button
                   type="button"
-                  className="organic-play"
-                  onClick={onPreview}
-                  aria-label={playingId === episode.id ? "Pause" : "Play"}
+                  className="organic-btn organic-btn-lime"
+                  disabled={busy !== null || audioPreparing}
+                  onClick={() => onRegenerateAudio(selectedVoiceId)}
                 >
-                  {playingId === episode.id ? "II" : "▶"}
+                  {audioGenerationBusy
+                    ? "Generating voice…"
+                    : reviewAudioButtonLabel({
+                        hasAudio,
+                        status: audioStatus,
+                      })}
                 </button>
-                <button type="button" aria-label="Forward 10 seconds" onClick={() => onSeek(10)}>
-                  +10
-                </button>
-                <select
-                  className="organic-playback-rate"
-                  aria-label="Playback speed"
-                  value={playbackRate}
-                  onChange={(event) =>
-                    onPlaybackRateChange(Number(event.target.value))
-                  }
-                >
-                  {PLAYBACK_RATE_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="organic-btn organic-btn-lime"
-                disabled={busy !== null || audioStatus === "loading"}
-                onClick={onRegenerateAudio}
-              >
-                {audioStatus === "loading"
-                  ? "Generating Audio..."
-                  : hasAudio
-                    ? "Repair Audio"
-                    : "Generate Audio"}
-              </button>
-            )}
+              )}
+            </div>
           </div>
           <button type="button" className="organic-btn organic-btn-light" onClick={onExport}>
             Final Export

@@ -2,18 +2,32 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 
 const env = fs.readFileSync(".env.local", "utf8");
-const supabaseUrl = env.match(/NEXT_PUBLIC_SUPABASE_URL=(.*)/)?.[1]?.trim()!;
-const supabaseKey = env.match(/SUPABASE_SERVICE_ROLE_KEY=(.*)/)?.[1]?.trim()!;
+
+function requireEnvValue(name: string): string {
+  const value = env.match(new RegExp(`^${name}=(.*)$`, "m"))?.[1]?.trim();
+  if (!value) throw new Error(`Missing ${name} in .env.local`);
+  return value;
+}
+
+type ContentItemSummaryRow = {
+  source_id: string | null;
+  summary: string | null;
+};
+
+const supabaseUrl = requireEnvValue("NEXT_PUBLIC_SUPABASE_URL");
+const supabaseKey = requireEnvValue("SUPABASE_SERVICE_ROLE_KEY");
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 async function run() {
   const { data: sources, error: sError } = await supabase.from("sources").select("id, name, type");
+  if (sError) throw sError;
   
   // Need to loop because supabase only returns 1000 items
-  let allItems: any[] = [];
+  const allItems: ContentItemSummaryRow[] = [];
   let from = 0;
   while (true) {
     const { data: items, error: iError } = await supabase.from("content_items").select("source_id, summary").range(from, from + 999);
+    if (iError) throw iError;
     if (items && items.length > 0) {
       allItems.push(...items);
       from += 1000;
@@ -29,7 +43,7 @@ async function run() {
     }
   }
   
-  const emptySources = sources!.filter(s => !sourceHasContent.has(s.id) && (s.type === 'rss' || s.type === 'atom'));
+  const emptySources = sources.filter(s => !sourceHasContent.has(s.id) && (s.type === 'rss' || s.type === 'atom'));
   console.log(`Found ${emptySources.length} sources with no content. Removing...`);
   
   for (const source of emptySources) {

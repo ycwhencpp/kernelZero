@@ -59,6 +59,8 @@ export type ContentItem = {
   sourceName: string;
   sourceId?: string;
   canonicalUrl: string;
+  /** Open-access URL used for extraction; canonicalUrl remains the citation URL. */
+  documentUrl?: string;
   doi?: string;
   arxivId?: string;
   publishedAt: string;
@@ -72,6 +74,56 @@ export type ContentItem = {
   saved: boolean;
   listened: boolean;
   processingState: "ready" | "queued" | "processing" | "failed";
+};
+
+export type SourceBlockKind =
+  | "heading"
+  | "paragraph"
+  | "list_item"
+  | "quote"
+  | "code"
+  | "table_row"
+  | "caption";
+
+/** Ordered, normalized source material. Raw HTML and PDF bytes are never stored. */
+export type SourceBlock = {
+  id: string;
+  order: number;
+  kind: SourceBlockKind;
+  text: string;
+  sectionPath: string[];
+  level?: 1 | 2 | 3 | 4 | 5 | 6;
+  page?: number;
+};
+
+export type SourceDocument = {
+  schemaVersion: 1;
+  contentItemId: string;
+  canonicalUrl: string;
+  retrievalUrl: string;
+  resolvedUrl: string;
+  format: "html" | "pdf" | "feed" | "abstract";
+  title?: string;
+  byline?: string;
+  language?: string;
+  blocks: SourceBlock[];
+  status: "ready" | "fallback" | "failed";
+  stats: {
+    rawBytes: number;
+    characters: number;
+    pages?: number;
+    truncated: boolean;
+  };
+  extraction: {
+    extractor: string;
+    version: string;
+    fetchedAt: string;
+    contentHash?: string;
+    warnings: string[];
+    errorCode?: string;
+    /** Transient extraction failures may be reused only until this instant. */
+    retryAfter?: string;
+  };
 };
 
 export type Collection = {
@@ -91,7 +143,12 @@ export type Citation = {
 export type Chapter = {
   title: string;
   startSeconds: number;
+  scriptStart?: number;
 };
+
+export type EpisodeGenerationWarning =
+  | "title_validation_failed"
+  | "length_below_target";
 
 export type EvidenceClaim = {
   id: string;
@@ -104,6 +161,24 @@ export type EvidenceClaim = {
   location: string;
 };
 
+/** One durable narration of an episode, identified by the voice that produced it. */
+export type EpisodeAudioVariant = {
+  id: string;
+  voiceId: string | null;
+  voiceKey: string;
+  voiceName: string;
+  provider: string;
+  audioUrl: string;
+  audioKey: string;
+  audioBytes: number | null;
+  contentType: string;
+  durationSeconds: number;
+  chapters: Chapter[];
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type Episode = {
   id: string;
   contentItemId?: string;
@@ -114,11 +189,16 @@ export type Episode = {
   showNotes: string;
   transcript: string;
   linkedInPost?: string | null;
+  generationWarning?: EpisodeGenerationWarning | null;
   citations: Citation[];
   chapters: Chapter[];
   audioUrl: string | null;
   audioKey?: string | null;
   audioBytes?: number | null;
+  /** The feed/public-playback recording. Optional for source compatibility. */
+  defaultAudioVariantId?: string | null;
+  /** All successfully stored voice recordings. Optional for source compatibility. */
+  audioVariants?: EpisodeAudioVariant[];
   durationSeconds: number;
   status: EpisodeStatus;
   publishedAt: string | null;

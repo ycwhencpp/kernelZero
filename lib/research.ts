@@ -52,9 +52,11 @@ export async function searchOpenAlex(query: string): Promise<NormalizedCandidate
       | undefined;
     const topic = raw.primary_topic as { display_name?: string } | undefined;
     const canonicalUrl =
-      openAccess?.oa_url ||
       primaryLocation?.landing_page_url ||
       String(raw.doi || raw.id);
+    const documentUrl = openAccess?.is_oa
+      ? primaryLocation?.pdf_url || openAccess.oa_url
+      : undefined;
 
     return {
       id: `openalex-${String(raw.id).split("/").pop()}`,
@@ -68,6 +70,7 @@ export async function searchOpenAlex(query: string): Promise<NormalizedCandidate
         .filter((value): value is string => Boolean(value)),
       sourceName: primaryLocation?.source?.display_name ?? "OpenAlex",
       canonicalUrl,
+      documentUrl,
       doi: raw.doi ? String(raw.doi) : undefined,
       publishedAt: `${String(raw.publication_date ?? new Date().toISOString().slice(0, 10))}T00:00:00Z`,
       accessLevel: openAccess?.is_oa ? ("open_access" as const) : ("abstract_only" as const),
@@ -119,7 +122,8 @@ export async function searchSemanticScholar(
         .map((author) => author.name)
         .filter((value): value is string => Boolean(value)),
       sourceName: String(raw.venue || "Semantic Scholar"),
-      canonicalUrl: openAccessPdf?.url || String(raw.url),
+      canonicalUrl: String(raw.url),
+      documentUrl: openAccessPdf?.url,
       doi: externalIds.DOI,
       arxivId: externalIds.ArXiv,
       publishedAt:
@@ -181,6 +185,10 @@ export async function searchArxiv(query: string): Promise<NormalizedCandidate[]>
       authors,
       sourceName: "arXiv",
       canonicalUrl: idUrl,
+      documentUrl: `https://arxiv.org/pdf/${arxivId
+        .split("/")
+        .map((part) => encodeURIComponent(part))
+        .join("/")}.pdf`,
       arxivId,
       publishedAt: read("published") || new Date().toISOString(),
       accessLevel: "open_access" as const,

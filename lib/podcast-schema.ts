@@ -3,12 +3,14 @@ export type PodcastDraft = {
   dek: string;
   script: string;
   showNotes: string;
-  chapters: Array<{ title: string; startSeconds: number }>;
+  chapters: Array<{ title: string; startSeconds: number; scriptStart?: number }>;
   claims: Array<{
     claim: string;
     support: string;
     confidence: number;
     location: string;
+    /** One-based index into the ordered source list. */
+    sourceNumber?: number;
   }>;
 };
 
@@ -16,6 +18,23 @@ export type PodcastSection = {
   script: string;
   claims: PodcastDraft["claims"];
 };
+
+/** Resolves new explicit source ownership while preserving legacy claim order. */
+export function podcastClaimSourceIndex(
+  claim: Pick<PodcastDraft["claims"][number], "sourceNumber">,
+  legacyClaimIndex: number,
+  sourceCount: number,
+): number {
+  if (!Number.isInteger(sourceCount) || sourceCount < 1) {
+    throw new Error("Podcast claims require at least one source.");
+  }
+  const sourceNumber = Number(claim.sourceNumber);
+  return Number.isInteger(sourceNumber) &&
+      sourceNumber >= 1 &&
+      sourceNumber <= sourceCount
+    ? sourceNumber - 1
+    : Math.min(Math.max(0, legacyClaimIndex), sourceCount - 1);
+}
 
 export function normalizeEvidenceConfidence(value: unknown): number {
   const confidence = Number(value);

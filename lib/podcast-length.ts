@@ -8,6 +8,13 @@ export type EpisodeLengthProfile = {
 
 export const PODCAST_LENGTH_SOFT_TOLERANCE_RATIO = 0.15;
 
+/**
+ * How far below the accepted minimum a transcript may land and still be kept
+ * as a warned draft. A local writer that misses the floor by a couple of
+ * percent should not discard a full generation run; anything worse still fails.
+ */
+export const PODCAST_LENGTH_DEGRADED_TOLERANCE_RATIO = 0.05;
+
 // Spoken narration averages roughly 150 words per minute. These are the target
 // bands; validation applies the shared proportional tolerance above so near
 // misses behave consistently across every episode length.
@@ -73,6 +80,29 @@ export function scriptMatchesEpisodeLength(script: string, length: EpisodeLength
   const words = countScriptWords(script);
   const accepted = episodeLengthAcceptanceRange(length);
   return words >= accepted.minWords && words <= accepted.maxWords;
+}
+
+/** Lowest word count that may still be kept as a warned draft. */
+export function episodeLengthDegradedFloor(length: EpisodeLength): number {
+  const accepted = episodeLengthAcceptanceRange(length);
+  return Math.max(
+    1,
+    Math.floor(accepted.minWords * (1 - PODCAST_LENGTH_DEGRADED_TOLERANCE_RATIO)),
+  );
+}
+
+/**
+ * True when a script is short of the accepted range but close enough to keep
+ * with a generation warning instead of discarding the run.
+ */
+export function scriptMatchesDegradedEpisodeLength(
+  script: string,
+  length: EpisodeLength,
+): boolean {
+  const words = countScriptWords(script);
+  const accepted = episodeLengthAcceptanceRange(length);
+  return words >= episodeLengthDegradedFloor(length) &&
+    words <= accepted.maxWords;
 }
 
 export function episodeLengthInstruction(
