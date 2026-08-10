@@ -11,12 +11,14 @@ export function OrganicCreateView({
   onStart,
   onAddSource,
   busy,
+  sourceLimit,
 }: {
   state: DashboardState;
   onBack: () => void;
   onStart: (itemIds: string[], episodeLength: EpisodeLength) => void;
   onAddSource: () => void;
   busy: string | null;
+  sourceLimit: number | null;
 }) {
   const sources = state.sources;
   const sourceIdsWithContent = useMemo(
@@ -41,8 +43,20 @@ export function OrganicCreateView({
     [state.items, selectedSourceIds],
   );
   const selectedItems = sourceSelection.selectedItems;
-  const allSourcesSelected =
-    sources.length > 0 && sources.every((source) => selectedSourceIds.includes(source.id));
+  const readySourceIds = useMemo(
+    () => sources
+      .filter((source) => sourceIdsWithContent.has(source.id))
+      .map((source) => source.id),
+    [sourceIdsWithContent, sources],
+  );
+  const bulkSelectionIds = sourceLimit === null
+    ? sources.map((source) => source.id)
+    : readySourceIds.slice(0, sourceLimit);
+  const allBulkSourcesSelected =
+    bulkSelectionIds.length > 0 &&
+    bulkSelectionIds.every((sourceId) => selectedSourceIds.includes(sourceId));
+  const readySourceLimitReached =
+    sourceLimit !== null && sourceSelection.readySourceCount >= sourceLimit;
 
   return (
     <div className="organic-create">
@@ -73,30 +87,34 @@ export function OrganicCreateView({
             <button
               type="button"
               className="organic-text-link lime"
-              aria-pressed={allSourcesSelected}
-              disabled={sources.length === 0}
+              aria-pressed={allBulkSourcesSelected}
+              disabled={bulkSelectionIds.length === 0}
               onClick={() =>
-                setSelectedSourceIds((current) => {
-                  const selectedIds = new Set(current);
-                  const hasEverySource = sources.every((source) => selectedIds.has(source.id));
-
-                  return hasEverySource ? [] : sources.map((source) => source.id);
-                })
+                setSelectedSourceIds(
+                  allBulkSourcesSelected ? [] : bulkSelectionIds,
+                )
               }
             >
-              {allSourcesSelected ? "Clear all" : "Select all"}
+              {allBulkSourcesSelected
+                ? "Clear all"
+                : sourceLimit !== null && readySourceIds.length > sourceLimit
+                  ? `Select first ${sourceLimit}`
+                  : "Select all"}
             </button>
           </div>
           <div className="organic-source-pick-grid">
             {sources.map((source) => {
               const selected = selectedSourceIds.includes(source.id);
               const hasContent = sourceIdsWithContent.has(source.id);
+              const disabledByLimit =
+                !selected && hasContent && readySourceLimitReached;
               return (
               <button
                 key={source.id}
                 type="button"
                 className={`organic-source-pick ${selected ? "is-selected" : ""}`}
                 aria-pressed={selected}
+                disabled={disabledByLimit}
                 onClick={() =>
                   setSelectedSourceIds((current) =>
                     current.includes(source.id)
@@ -116,6 +134,12 @@ export function OrganicCreateView({
               Connect New Source
             </button>
           </div>
+          {sourceLimit !== null && readySourceIds.length > sourceLimit && (
+            <p className="organic-panel-copy" role="status">
+              Local Ollama generation accepts up to {sourceLimit} ready sources.
+              {readySourceLimitReached && " Deselect one to choose a different source."}
+            </p>
+          )}
           {sourceSelection.unavailableSourceCount > 0 && (
             <p className="organic-panel-copy" role="status">
               {sourceSelection.unavailableSourceCount} selected {sourceSelection.unavailableSourceCount === 1 ? "source has" : "sources have"} no imported content yet and will be skipped. Refresh them from Sources.

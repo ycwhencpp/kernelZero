@@ -1,4 +1,10 @@
 import { authErrorResponse, currentOwner } from "../../../../../lib/auth";
+import {
+  audioGenerationJobId,
+  isPublishedAudioDefaultConflict,
+  parseRequiredAudioVariantSelection,
+} from "../../../../../lib/audio-variant-api";
+import { parseAudioVoiceSelection } from "../../../../../lib/audio-voice-selection";
 import { hasBudgetForGeneration } from "../../../../../lib/domain";
 import {
   hasUsableAudioUrl,
@@ -12,11 +18,15 @@ import {
 } from "../../../../../lib/openai";
 import {
   acquireJobLease,
+  EpisodeAudioVariantNotFoundError,
+  EpisodeNotFoundError,
   findEpisode,
   finishJobLease,
   getActiveVoiceProfile,
   getDashboardState,
+  getVoiceProfileById,
   replaceEpisodeAudio,
+  setEpisodeDefaultAudioVariant,
 } from "../../../../../lib/store";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +34,7 @@ export const runtime = "nodejs";
 
 const AUDIO_RETRY_LEASE_TIMEOUT_MS = 4 * 60 * 60 * 1_000;
 
-export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   let jobId: string | null = null;
   let ownerId: string | null = null;
   let leaseStartedAt: string | null = null;
@@ -35,14 +45,27 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   try {
     ownerId = await currentOwner("editor");
     const { id } = await context.params;
+    const voiceSelection = await parseAudioVoiceSelection(request);
+    if (!voiceSelection.ok) {
+      return Response.json({ error: voiceSelection.error }, { status: 400 });
+    }
+    const requestedVoiceId = voiceSelection.voiceId;
     const [episode, voiceProfile, initialState] = await Promise.all([
       findEpisode(ownerId, id),
-      getActiveVoiceProfile(ownerId),
+      requestedVoiceId
+        ? getVoiceProfileById(ownerId, requestedVoiceId)
+        : getActiveVoiceProfile(ownerId),
       getDashboardState(ownerId),
     ]);
     if (!episode) return Response.json({ error: "Episode not found." }, { status: 404 });
+    if (requestedVoiceId && !voiceProfile) {
+      return Response.json(
+        { error: "The selected narrator was not found in this workspace." },
+        { status: 400 },
+      );
+    }
     const hasLocalChatterboxVoice = Boolean(
-      voiceProfile?.active && voiceProfile.provider === "chatterbox",
+      voiceProfile?.provider === "chatterbox",
     );
     if (process.env.REQUIRE_LOCAL_VOICE === "true" && !hasLocalChatterboxVoice) {
       return Response.json({ error: "Choose a local Chatterbox narrator before regenerating audio." }, { status: 400 });
@@ -72,7 +95,20 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     jobProvider = hasLocalChatterboxVoice
       ? "Local Chatterbox"
       : aiProviderLabel(provider);
-    jobId = `job-audio-${new Date().toISOString().slice(0, 10)}`;
+    const variantProvider = hasLocalChatterboxVoice
+      ? "chatterbox" as const
+      : provider!;
+    const voiceKey = hasLocalChatterboxVoice
+      ? `profile:${voiceProfile!.id}`
+      : `provider:${variantProvider}`;
+    const voiceName = hasLocalChatterboxVoice
+      ? voiceProfile!.name
+      : aiProviderLabel(provider);
+    jobId = audioGenerationJobId(
+      new Date().toISOString().slice(0, 10),
+      episode.id,
+      voiceKey,
+    );
     const lease = await acquireJobLease(
       ownerId,
       {
@@ -85,7 +121,7 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     );
     if (!lease.acquired) {
       return Response.json(
-        { error: "Audio generation is already running for this workspace." },
+        { error: "Audio generation is already running for this episode and narrator." },
         { status: 409 },
       );
     }
@@ -133,9 +169,23 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
       generated.audio,
       generated.audioContentType,
       generated.durationSeconds,
+      {
+        voiceProfileId: hasLocalChatterboxVoice ? voiceProfile!.id : null,
+        voiceKey,
+        voiceName,
+        provider: variantProvider,
+      },
     );
     if (!hasUsableAudioUrl(updatedEpisode.audioUrl)) {
       throw new Error("The generated audio could not be stored with the episode.");
+    }
+    const generatedVariant = updatedEpisode.audioVariants?.find(
+      (variant) => variant.voiceKey === voiceKey,
+    ) ?? (updatedEpisode.audioVariants?.length === 1
+      ? updatedEpisode.audioVariants[0]
+      : undefined);
+    if (!generatedVariant) {
+      throw new Error("The generated audio variant could not be loaded.");
     }
     const completionToken = leaseStartedAt;
     leaseStartedAt = null;
@@ -172,7 +222,10 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     const reconciled = reconcileGeneratedEpisode(state, updatedEpisode, {
       stateIsAuthoritative,
     });
-    return Response.json(reconciled);
+    return Response.json({
+      ...reconciled,
+      audioVariantId: generatedVariant.id,
+    });
   } catch (error) {
     if (ownerId && jobId && leaseStartedAt) {
       const failureToken = leaseStartedAt;
@@ -199,6 +252,50 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
     }
     return authErrorResponse(error) ?? Response.json(
       { error: error instanceof Error ? error.message : "Unable to regenerate local audio." },
+      { status: 500 },
+    );
+  }
+}
+
+export async function PATCH(
+  request: Request,
+  context: { params: Promise<{ id: string }> },
+) {
+  try {
+    const ownerId = await currentOwner("owner");
+    const { id } = await context.params;
+    const selection = await parseRequiredAudioVariantSelection(request);
+    if (!selection.ok) {
+      return Response.json({ error: selection.error }, { status: 400 });
+    }
+    await setEpisodeDefaultAudioVariant(
+      ownerId,
+      id,
+      selection.audioVariantId,
+    );
+    return Response.json({ state: await getDashboardState(ownerId) });
+  } catch (error) {
+    if (
+      error instanceof EpisodeNotFoundError ||
+      error instanceof EpisodeAudioVariantNotFoundError
+    ) {
+      return Response.json({ error: error.message }, { status: 404 });
+    }
+    if (isPublishedAudioDefaultConflict(error)) {
+      return Response.json(
+        {
+          code: "published_audio_default_locked",
+          error: error.message,
+        },
+        { status: 409 },
+      );
+    }
+    return authErrorResponse(error) ?? Response.json(
+      {
+        error: error instanceof Error
+          ? error.message
+          : "Unable to select the default audio variant.",
+      },
       { status: 500 },
     );
   }

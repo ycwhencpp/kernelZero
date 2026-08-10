@@ -2,8 +2,15 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "fs";
 
 const env = fs.readFileSync(".env.local", "utf8");
-const supabaseUrl = env.match(/NEXT_PUBLIC_SUPABASE_URL=(.*)/)?.[1]?.trim()!;
-const supabaseKey = env.match(/SUPABASE_SERVICE_ROLE_KEY=(.*)/)?.[1]?.trim()!;
+
+function requireEnvValue(name: string): string {
+  const value = env.match(new RegExp(`^${name}=(.*)$`, "m"))?.[1]?.trim();
+  if (!value) throw new Error(`Missing ${name} in .env.local`);
+  return value;
+}
+
+const supabaseUrl = requireEnvValue("NEXT_PUBLIC_SUPABASE_URL");
+const supabaseKey = requireEnvValue("SUPABASE_SERVICE_ROLE_KEY");
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 const ownerId = "anurag.jay1002@gmail.com";
@@ -98,6 +105,7 @@ export function simpleHash(value: string): string {
 
 async function run() {
   const { data: existingSources, error: e1 } = await supabase.from("sources").select("name");
+  if (e1) throw e1;
   const existingNames = new Set(existingSources?.map(s => s.name) || []);
 
   const toInsert = [];

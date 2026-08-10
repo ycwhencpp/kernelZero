@@ -26,6 +26,13 @@ import {
   episodeSourceItemIds,
   parsePodcastRegenerationContext,
 } from "../../../lib/podcast-regeneration";
+import { createPipelineTraceId } from "../../../lib/pipeline-log";
+import { hydratePodcastSources } from "../../../lib/source-documents";
+import {
+  limitPodcastSourceIds,
+  MAX_OLLAMA_PODCAST_SOURCES,
+  uniquePodcastSourceIds,
+} from "../../../lib/podcast-source-selection";
 import type {
   DashboardState,
   Episode,
@@ -133,9 +140,24 @@ export async function POST(request: Request) {
         { status: 429 },
       );
     }
-    const itemIds = sourceEpisode
+    const requestedItemIds = sourceEpisode
       ? episodeSourceItemIds(state, sourceEpisode)
-      : body.itemIds ?? [];
+      : uniquePodcastSourceIds(body.itemIds);
+    let sourceSelectionNotice: string | undefined;
+    let itemIds = requestedItemIds;
+    if (
+      provider === "ollama" &&
+      regeneration &&
+      itemIds.length > MAX_OLLAMA_PODCAST_SOURCES
+    ) {
+      const limited = limitPodcastSourceIds(itemIds);
+      itemIds = limited.itemIds;
+      sourceSelectionNotice =
+        `This Ollama regeneration used the first ${MAX_OLLAMA_PODCAST_SOURCES} sources from the original episode; ${limited.omittedCount} additional ${limited.omittedCount === 1 ? "source was" : "sources were"} omitted.`;
+      console.info(
+        `[generate] job=${jobId} limited legacy regeneration sources requested=${requestedItemIds.length} selected=${itemIds.length}`,
+      );
+    }
     if (regeneration && itemIds.length === 0) {
       return Response.json(
         { error: "The original sources for this draft are no longer available." },
@@ -150,11 +172,23 @@ export async function POST(request: Request) {
       );
     }
     if (!regeneration && type === "daily_digest" && items.length === 0) {
-      items = selectDigestItems(state.items, 5);
+      items = selectDigestItems(state.items, MAX_OLLAMA_PODCAST_SOURCES);
     }
     if (items.length === 0) {
       return Response.json(
         { error: "Choose at least one source for the episode." },
+        { status: 400 },
+      );
+    }
+    if (
+      provider === "ollama" &&
+      items.length > MAX_OLLAMA_PODCAST_SOURCES
+    ) {
+      return Response.json(
+        {
+          error:
+            `Choose no more than ${MAX_OLLAMA_PODCAST_SOURCES} ready sources for Ollama generation.`,
+        },
         { status: 400 },
       );
     }
@@ -180,6 +214,10 @@ export async function POST(request: Request) {
       status: "running",
       provider: aiProviderLabel(provider),
     });
+    const traceId = createPipelineTraceId("manual-podcast");
+    const sourceCorpus = provider === "ollama"
+      ? await hydratePodcastSources(ownerId, items, { traceId })
+      : undefined;
     let checkpointedEpisode: Episode | null = null;
     let checkpointedEvidence: EvidenceClaim[] = [];
     let checkpointProvider: "openai" | "gemini" | "ollama" | null = null;
@@ -232,6 +270,7 @@ export async function POST(request: Request) {
         provider: failedProvider,
         state: reconciled.state,
         audioError: NARRATION_RETRY_MESSAGE,
+        sourceSelectionNotice,
       });
     };
 
@@ -242,6 +281,8 @@ export async function POST(request: Request) {
         voiceProfile,
         episodeLength: normalizeEpisodeLength(body.episodeLength ?? state.settings.episodeLength),
         regeneration,
+        sourceCorpus,
+        traceId,
         onDraftReady: async (checkpoint) => {
           if (sourceEpisode) {
             checkpoint.episode.generation = sourceEpisode.generation + 1;
@@ -295,6 +336,14 @@ export async function POST(request: Request) {
           generated.audio,
           generated.audioContentType ?? undefined,
           generated.episode.durationSeconds,
+          {
+            voiceProfileId: voiceProfile?.id ?? null,
+            voiceKey: voiceProfile
+              ? `profile:${voiceProfile.id}`
+              : `provider:${generated.provider}`,
+            voiceName: voiceProfile?.name ?? aiProviderLabel(generated.provider),
+            provider: voiceProfile?.provider ?? generated.provider,
+          },
         );
         if (needsAudio && !hasUsableAudioUrl(episode.audioUrl)) {
           throw new Error(
@@ -384,6 +433,7 @@ export async function POST(request: Request) {
       episode: storedEpisode,
       provider: generated.provider,
       state: responseState,
+      sourceSelectionNotice,
     });
   } catch (error) {
     const errorMessage = error instanceof Error

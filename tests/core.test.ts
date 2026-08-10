@@ -108,8 +108,10 @@ import {
 import {
   countScriptWords,
   episodeLengthAcceptanceRange,
+  episodeLengthDegradedFloor,
   episodeLengthInstruction,
   estimateScriptDurationSeconds,
+  scriptMatchesDegradedEpisodeLength,
   scriptMatchesEpisodeLength,
 } from "../lib/podcast-length.ts";
 import {
@@ -140,12 +142,21 @@ import {
 import { splitNarrationSentences } from "../lib/sentence-segmentation.ts";
 import {
   acquireJobLease,
+  approveEpisode,
+  createEpisode,
+  EpisodeGenerationWarningApprovalRequiredError,
   EpisodeNotFoundError,
   finishJobLease,
   renewJobLease,
   saveLinkedInPost,
   storedDurationSeconds,
+  updateEpisode,
 } from "../lib/store.ts";
+import {
+  episodeTitleGenerationWarning,
+  titleValidationTerms,
+  validateEpisodeTitle,
+} from "../lib/title-validation.ts";
 import type {
   ContentItem,
   Episode,
@@ -477,6 +488,35 @@ test("standard episode length is enforced as a complete nine-minute script", () 
   assert.equal(scriptMatchesEpisodeLength("Only an introduction.", "standard"), false);
 });
 
+test("the degraded length floor keeps a near-miss transcript and nothing worse", () => {
+  assert.equal(episodeLengthDegradedFloor("standard"), 981);
+  const words = (count: number) =>
+    Array.from({ length: count }, () => "word").join(" ");
+
+  for (const count of [981, 1_013, 1_032]) {
+    assert.equal(
+      scriptMatchesDegradedEpisodeLength(words(count), "standard"),
+      true,
+      `${count} words must remain publishable with a warning`,
+    );
+    assert.equal(
+      scriptMatchesEpisodeLength(words(count), "standard"),
+      false,
+      `${count} words must never pass the unwarned gate`,
+    );
+  }
+  assert.equal(
+    scriptMatchesDegradedEpisodeLength(words(980), "standard"),
+    false,
+    "a shortfall beyond the tolerance stays a hard failure",
+  );
+  assert.equal(
+    scriptMatchesDegradedEpisodeLength(words(1_708), "standard"),
+    false,
+    "the warning never excuses an overlength transcript",
+  );
+});
+
 test("repetition audit allows framing continuity but blocks repeated concrete facts", () => {
   assert.equal(
     isActionableRepetitionIssue(
@@ -728,6 +768,41 @@ test("generated audio duration is normalized for integer database storage", () =
   assert.equal(storedDurationSeconds(Number.NaN), 0);
 });
 
+test("title validation requires distinctive title terms to recur in the script", () => {
+  const alignedScript =
+    "Valkey reduces memory costs in the tested workflow. Mem0 also reduces memory costs. " +
+    "The Valkey comparison and the Mem0 comparison expose different trade-offs.";
+  const passing = validateEpisodeTitle(
+    "Valkey and Mem0 reduce memory costs",
+    alignedScript,
+  );
+  assert.equal(passing.valid, true);
+  assert.deepEqual(passing.recurringTerms.sort(), [
+    "costs",
+    "mem0",
+    "memory",
+    "valkey",
+  ]);
+  assert.equal(
+    episodeTitleGenerationWarning(
+      "Valkey and Mem0 reduce memory costs",
+      alignedScript,
+    ),
+    null,
+  );
+
+  const passingDetail =
+    "The survey compares agent runtimes, storage layers, and observability. " +
+    "Ollama appears once, while VS Code is mentioned only in a setup aside.";
+  const failing = validateEpisodeTitle("An Ollama and VS Code how-to", passingDetail);
+  assert.equal(failing.valid, false);
+  assert.equal(
+    episodeTitleGenerationWarning("An Ollama and VS Code how-to", passingDetail),
+    "title_validation_failed",
+  );
+  assert.deepEqual(titleValidationTerms("The future of AI podcast"), []);
+});
+
 test("encoded WAV duration is read from its PCM byte rate", () => {
   const wav = pcmToWav(new Uint8Array(48_000), 24_000);
   assert.equal(encodedAudioDurationSeconds(wav, "audio/wav"), 1);
@@ -757,6 +832,7 @@ test("generation response keeps returned audio when refreshed state is stale", (
     script: "The regenerated script.",
     showNotes: "Source notes.",
     transcript: "The regenerated script.",
+    generationWarning: "title_validation_failed",
     citations: [],
     chapters: [{ title: "Opening", startSeconds: 0 }],
     audioUrl: null,
@@ -772,6 +848,25 @@ test("generation response keeps returned audio when refreshed state is stale", (
     audioUrl: "/api/media/episodes/episode-regenerated.mp3",
     audioKey: "episodes/episode-regenerated.mp3",
     audioBytes: 7_809_452,
+    defaultAudioVariantId: "audio-variant-primary",
+    audioVariants: [
+      {
+        id: "audio-variant-primary",
+        voiceId: "voice-primary",
+        voiceKey: "profile:voice-primary",
+        voiceName: "Primary narrator",
+        provider: "chatterbox",
+        audioUrl: "/api/media/episodes/episode-regenerated.mp3",
+        audioKey: "episodes/episode-regenerated.mp3",
+        audioBytes: 7_809_452,
+        contentType: "audio/mpeg",
+        durationSeconds: 488,
+        chapters: staleEpisode.chapters,
+        isDefault: true,
+        createdAt: "2026-07-28T00:00:00.000Z",
+        updatedAt: "2026-07-28T00:00:00.000Z",
+      },
+    ],
   };
 
   const generated = reconcileGeneratedEpisode(
@@ -780,7 +875,16 @@ test("generation response keeps returned audio when refreshed state is stale", (
   );
 
   assert.equal(generated.episode.audioUrl, returnedEpisode.audioUrl);
+  assert.equal(generated.episode.generationWarning, "title_validation_failed");
   assert.equal(generated.state.episodes[0].audioUrl, returnedEpisode.audioUrl);
+  assert.equal(
+    generated.state.episodes[0].defaultAudioVariantId,
+    "audio-variant-primary",
+  );
+  assert.deepEqual(
+    generated.state.episodes[0].audioVariants,
+    returnedEpisode.audioVariants,
+  );
   assert.equal(hasUsableAudioUrl(returnedEpisode.audioUrl), true);
   assert.doesNotThrow(() => requireGeneratedAudio(generated.episode, true));
   assert.throws(
@@ -2178,6 +2282,7 @@ test("LinkedIn post persistence writes and maps the owner-scoped episode column"
         show_notes: "",
         transcript: "Episode transcript",
         linkedin_post: savedPost,
+        generation_warning: "title_validation_failed",
         citations_json: [],
         chapters_json: [],
         audio_url: null,
@@ -2201,6 +2306,7 @@ test("LinkedIn post persistence writes and maps the owner-scoped episode column"
       savedPost,
     );
     assert.equal(episode.linkedInPost, savedPost);
+    assert.equal(episode.generationWarning, "title_validation_failed");
     assert.equal(requestMethod, "PATCH");
     assert.match(requestUrl, /\/rest\/v1\/episodes/);
     assert.match(requestUrl, /id=eq\.episode-linkedin/);
@@ -2211,6 +2317,284 @@ test("LinkedIn post persistence writes and maps the owner-scoped episode column"
       () => saveLinkedInPost("owner-1", "missing-episode", savedPost),
       EpisodeNotFoundError,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSupabaseUrl === undefined) {
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    } else {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = originalSupabaseUrl;
+    }
+    if (originalServiceKey === undefined) {
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    } else {
+      process.env.SUPABASE_SERVICE_ROLE_KEY = originalServiceKey;
+    }
+  }
+});
+
+test("a length warning survives the round trip and an unknown warning value does not", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const originalServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const savedPost = "Saved title\n\nSaved body\n\n#One #Two #Three #Four #Five";
+  let storedWarning: string = "length_below_target";
+  let writtenWarning: unknown;
+
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if ("generation_warning" in body) writtenWarning = body.generation_warning;
+    return new Response(
+      JSON.stringify({
+        id: "episode-length-warning",
+        owner_id: "owner-1",
+        type: "daily_digest",
+        title: "Short episode",
+        dek: "",
+        script: "Episode script",
+        show_notes: "",
+        transcript: "Episode transcript",
+        linkedin_post: savedPost,
+        generation_warning: storedWarning,
+        citations_json: [],
+        chapters_json: [],
+        audio_url: null,
+        audio_key: null,
+        audio_bytes: null,
+        duration_seconds: 400,
+        status: "needs_approval",
+        published_at: null,
+        immutable_guid: "kernelzero:episode-length-warning",
+        generation: 1,
+        created_at: "2026-08-08T00:00:00.000Z",
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const warned = await saveLinkedInPost(
+      "owner-1",
+      "episode-length-warning",
+      savedPost,
+    );
+    assert.equal(warned.generationWarning, "length_below_target");
+
+    await updateEpisode("owner-1", "episode-length-warning", {
+      generationWarning: "length_below_target",
+    });
+    assert.equal(writtenWarning, "length_below_target");
+
+    storedWarning = "some_future_warning";
+    const unknown = await saveLinkedInPost(
+      "owner-1",
+      "episode-length-warning",
+      savedPost,
+    );
+    assert.equal(
+      unknown.generationWarning,
+      null,
+      "an unrecognized stored value must never become a typed warning",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSupabaseUrl === undefined) {
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    } else {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = originalSupabaseUrl;
+    }
+    if (originalServiceKey === undefined) {
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    } else {
+      process.env.SUPABASE_SERVICE_ROLE_KEY = originalServiceKey;
+    }
+  }
+});
+
+test("episode creation and edits persist title warning metadata", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const originalServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const requests: Array<{
+    method: string;
+    body: Record<string, unknown> | Array<Record<string, unknown>>;
+  }> = [];
+
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  globalThis.fetch = (async (_input, init) => {
+    requests.push({
+      method: init?.method ?? "GET",
+      body: init?.body
+        ? JSON.parse(String(init.body)) as
+            | Record<string, unknown>
+            | Array<Record<string, unknown>>
+        : {},
+    });
+    return new Response("[]", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const episode: Episode = {
+    id: "episode-warning-persistence",
+    type: "daily_digest",
+    title: "Ollama setup",
+    dek: "A draft whose title needs review.",
+    script: "A broad survey that mentions Ollama only once.",
+    showNotes: "Source notes.",
+    transcript: "A broad survey that mentions Ollama only once.",
+    generationWarning: "title_validation_failed",
+    citations: [],
+    chapters: [{ title: "Opening", startSeconds: 0, scriptStart: 0 }],
+    audioUrl: null,
+    durationSeconds: 90,
+    status: "needs_approval",
+    publishedAt: null,
+    immutableGuid: "kernelzero:episode-warning-persistence",
+    generation: 1,
+    createdAt: "2026-08-08T00:00:00.000Z",
+  };
+
+  try {
+    await createEpisode("owner-1", episode, []);
+    await updateEpisode("owner-1", episode.id, {
+      title: "Agent infrastructure survey",
+      dek: "An updated summary.",
+      generationWarning: null,
+    });
+
+    const insertBody = Array.isArray(requests[0].body)
+      ? requests[0].body[0]
+      : requests[0].body;
+    assert.equal(requests[0].method, "POST");
+    assert.equal(insertBody.generation_warning, "title_validation_failed");
+    assert.deepEqual(insertBody.chapters_json, [
+      { title: "Opening", startSeconds: 0, scriptStart: 0 },
+    ]);
+    assert.equal(requests[1].method, "PATCH");
+    assert.deepEqual(requests[1].body, {
+      title: "Agent infrastructure survey",
+      dek: "An updated summary.",
+      generation_warning: null,
+      updated_at: (requests[1].body as Record<string, unknown>).updated_at,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSupabaseUrl === undefined) {
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    } else {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = originalSupabaseUrl;
+    }
+    if (originalServiceKey === undefined) {
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    } else {
+      process.env.SUPABASE_SERVICE_ROLE_KEY = originalServiceKey;
+    }
+  }
+});
+
+test("warned episodes require an explicit publication override", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const originalServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
+
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  globalThis.fetch = (async (_input, init) => {
+    const method = init?.method ?? "GET";
+    requests.push({
+      method,
+      body: init?.body
+        ? JSON.parse(String(init.body)) as Record<string, unknown>
+        : {},
+    });
+    if (method === "GET") {
+      return new Response(
+        JSON.stringify({
+          audio_key: "audio/episode-warning.mp3",
+          audio_url: "/api/media/audio/episode-warning.mp3",
+          published_at: null,
+          generation_warning: "title_validation_failed",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response("[]", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => approveEpisode("owner-1", "episode-warning"),
+      EpisodeGenerationWarningApprovalRequiredError,
+    );
+    assert.equal(requests.filter((request) => request.method === "PATCH").length, 0);
+
+    await approveEpisode("owner-1", "episode-warning", {
+      overrideTitleWarning: true,
+    });
+    const update = requests.find((request) => request.method === "PATCH");
+    assert.ok(update);
+    assert.equal(update.body.status, "published");
+    assert.equal(typeof update.body.published_at, "string");
+    assert.equal("generation_warning" in update.body, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalSupabaseUrl === undefined) {
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    } else {
+      process.env.NEXT_PUBLIC_SUPABASE_URL = originalSupabaseUrl;
+    }
+    if (originalServiceKey === undefined) {
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    } else {
+      process.env.SUPABASE_SERVICE_ROLE_KEY = originalServiceKey;
+    }
+  }
+});
+
+test("warning-free approval is conditional against concurrent warning edits", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const originalServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  let patchUrl = "";
+
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://supabase.test";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  globalThis.fetch = (async (input, init) => {
+    const method = init?.method ?? "GET";
+    if (method === "GET") {
+      return new Response(
+        JSON.stringify({
+          audio_key: "audio/episode-race.mp3",
+          audio_url: null,
+          published_at: null,
+          generation_warning: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    patchUrl = String(input);
+    // The conditional update matched no row because a warning appeared after
+    // the lookup. Supabase maybeSingle normalizes this to null.
+    return new Response("[]", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      () => approveEpisode("owner-1", "episode-race"),
+      EpisodeGenerationWarningApprovalRequiredError,
+    );
+    assert.match(patchUrl, /generation_warning=is\.null/);
   } finally {
     globalThis.fetch = originalFetch;
     if (originalSupabaseUrl === undefined) {

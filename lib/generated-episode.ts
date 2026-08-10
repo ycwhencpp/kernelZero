@@ -48,6 +48,11 @@ export function reconcileGeneratedEpisode<
           audioBytes: returnedEpisode.audioBytes,
           chapters: returnedEpisode.chapters,
           durationSeconds: returnedEpisode.durationSeconds,
+          defaultAudioVariantId:
+            returnedEpisode.defaultAudioVariantId ??
+            storedEpisode.defaultAudioVariantId,
+          audioVariants:
+            returnedEpisode.audioVariants ?? storedEpisode.audioVariants,
         }
       : storedEpisode
     : returnedEpisode;

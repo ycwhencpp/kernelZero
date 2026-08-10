@@ -10,7 +10,8 @@
     "build": "next build",
     "start": "next start",
     "test": "npm run test:unit && npm run build",
-    "test:unit": "node --import tsx --test tests/core.test.ts tests/ollama-resilience.test.ts tests/source-selection.test.ts",
+    "test:unit": "node --import tsx --test tests/*.test.ts",
+    "calibrate:dedup": "node --import tsx scripts/calibrate-dedup.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:migrate": "supabase db push"
   },
@@ -21,11 +22,13 @@
     "@types/jsdom": "^28.0.3",
     "@vercel/analytics": "^2.0.1",
     "@vercel/speed-insights": "^2.0.0",
+    "ipaddr.js": "^2.5.0",
     "jsdom": "^30.0.1",
     "next": "16.2.6",
     "react": "19.2.6",
     "react-dom": "19.2.6",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "unpdf": "^1.8.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.2.1",

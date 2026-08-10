@@ -1,4 +1,5 @@
 import { currentUser } from "../../../../lib/auth";
+import { isAnonymousEpisodeAudioAccess } from "../../../../lib/audio-variant-api";
 import { mediaKeyFromRoute } from "../../../../lib/media-path";
 import {
   getMediaEpisodeAccess,
@@ -18,7 +19,7 @@ export async function GET(
   const access = await getMediaEpisodeAccess(key);
   if (!access) return new Response("Not found", { status: 404 });
 
-  const isPublic = access.status === "published";
+  const isPublic = isAnonymousEpisodeAudioAccess(access);
   if (!isPublic) {
     const user = await currentUser();
     if (!user || user.workspaceOwnerId !== access.ownerId) {

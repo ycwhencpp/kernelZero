@@ -15,6 +15,11 @@ import {
 import { hasUsableAudioUrl } from "../../../../lib/generated-episode";
 import { discoverResearch } from "../../../../lib/research";
 import { fetchFeed } from "../../../../lib/rss";
+import { createPipelineTraceId } from "../../../../lib/pipeline-log";
+import {
+  hydratePodcastSources,
+  storeSourceDocuments,
+} from "../../../../lib/source-documents";
 import {
   acquireJobLease,
   addSource,
@@ -298,6 +303,14 @@ export async function GET(request: Request) {
           speech.audio,
           speech.audioContentType,
           speech.durationSeconds,
+          {
+            voiceProfileId: voiceProfile?.id ?? null,
+            voiceKey: voiceProfile
+              ? `profile:${voiceProfile.id}`
+              : `provider:${provider ?? "configured"}`,
+            voiceName: voiceProfile?.name ?? aiProviderLabel(provider),
+            provider: voiceProfile?.provider ?? provider ?? "configured",
+          },
         );
         await assertLeaseOwned();
       }
@@ -322,6 +335,7 @@ export async function GET(request: Request) {
       throw new Error("No AI provider is configured for the daily podcast.");
     }
     const discovered: typeof leasedState.items = [];
+    const feedDocuments: Awaited<ReturnType<typeof fetchFeed>>["documents"] = [];
     const warnings: string[] = [];
     for (const interest of leasedState.interests.filter((entry) => entry.enabled)) {
       const result = await discoverResearch(interest);
@@ -334,6 +348,7 @@ export async function GET(request: Request) {
     )) {
       try {
         const parsed = await fetchFeed(source.url);
+        feedDocuments.push(...parsed.documents);
         discovered.push(
           ...parsed.items.map((candidate) =>
             scoreCandidate(
@@ -361,13 +376,30 @@ export async function GET(request: Request) {
     const personalized = await personalizeItems(ownerId, discovered);
     const unique = deduplicateItems([...leasedState.items, ...personalized]);
     await upsertItems(ownerId, unique);
+    // content_documents references content_items, so extracted feed bodies are
+    // cached only after their corresponding items have been persisted.
+    const persistedItemIds = new Set(unique.map((item) => item.id));
+    const uniqueFeedDocuments = [
+      ...new Map(
+        feedDocuments
+          .filter((document) => persistedItemIds.has(document.contentItemId))
+          .map((document) => [document.contentItemId, document]),
+      ).values(),
+    ];
+    await storeSourceDocuments(ownerId, uniqueFeedDocuments);
 
     const digestItems = selectDigestItems(unique, 5);
+    const traceId = createPipelineTraceId("daily-podcast");
+    const sourceCorpus = provider === "ollama"
+      ? await hydratePodcastSources(ownerId, digestItems, { traceId })
+      : undefined;
     const generated = await generatePodcast(digestItems, "daily_digest", {
       includeAudio: true,
       voiceProfile,
       episodeLength: leasedState.settings.episodeLength,
       episodeId: checkpointId,
+      sourceCorpus,
+      traceId,
       onDraftReady: async (checkpoint) => {
         await assertLeaseOwned();
         await createEpisode(ownerId, checkpoint.episode, checkpoint.evidence);
@@ -384,6 +416,14 @@ export async function GET(request: Request) {
       generated.audio,
       generated.audioContentType ?? undefined,
       generated.episode.durationSeconds,
+      {
+        voiceProfileId: voiceProfile?.id ?? null,
+        voiceKey: voiceProfile
+          ? `profile:${voiceProfile.id}`
+          : `provider:${generated.provider}`,
+        voiceName: voiceProfile?.name ?? aiProviderLabel(generated.provider),
+        provider: voiceProfile?.provider ?? generated.provider,
+      },
     );
     await assertLeaseOwned();
     const completionToken = await stopLeaseHeartbeat();

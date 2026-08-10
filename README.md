@@ -11,11 +11,11 @@ KernelZero is a personal research-intelligence and podcast studio. It discovers 
 - User-approved RSS/Atom source verification and ingestion.
 - DOI/arXiv/URL/title deduplication and relevance/freshness/authority ranking.
 - Daily digest and paper/blog deep-dive generation.
-- Structured claim ledger plus a separate evidence-verification pass.
+- Structured claim ledger with explicit source ownership and evidence review.
 - OpenAI Responses API, Gemini, and a local Ollama/macOS speech path.
 - Consent-backed local Chatterbox narrator voices: Ollama can write the script while Chatterbox narrates with the selected local reference voice.
 - Supabase email/password login with an isolated workspace for every account.
-- Review-before-publish approval restricted to each workspace owner.
+- Review-before-publish approval restricted to each workspace owner, including durable title-alignment warnings and an explicit owner override.
 - An authenticated Explore directory for published podcasts and creator profiles.
 - Public `/feed.xml`, transcript routes, immutable episode GUIDs, and podcast artwork.
 - Signed daily scheduler endpoint with idempotent job history.
@@ -29,7 +29,7 @@ npm run dev
 ```
 
 Create a Supabase project and run every migration in `supabase/migrations/`
-(currently `0001_initial.sql` through `0008_user_workspace_isolation.sql`). Enable the
+(currently `0001_initial.sql` through `0010_episode_generation_warning.sql`). Enable the
 Email provider in **Authentication → Providers**, then add
 `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and the
 server-only `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`. Older Supabase projects
@@ -50,24 +50,39 @@ records are never loaded from another account. Profile pictures are uploaded as
 validated JPEG, PNG, or WebP files and served through short-lived signed URLs;
 arbitrary remote image URLs are not accepted.
 
-Install Ollama plus FFmpeg, pull a model such as `qwen2.5:14b`, and set `AI_PROVIDER=ollama` (or leave `AI_PROVIDER=auto`; it falls back to Ollama when cloud keys are absent). KernelZero uses the local model for structured writing and verification, then macOS speech synthesis for MP3 audio when no custom local voice is configured. Provider calls are server-only; no static demo records are inserted into the database.
+Install Ollama plus FFmpeg, pull `redbus-gemma:latest`,
+`mistral:7b-instruct`, `nomic-embed-text`, and
+`gpt-oss-safeguard:20b`, then set `AI_PROVIDER=ollama` (or leave
+`AI_PROVIDER=auto`; it falls back to Ollama when cloud keys are absent). macOS
+speech synthesis produces MP3 audio when no custom local voice is configured.
+Provider calls and source extraction are server-only.
 
-KernelZero uses a staged parallel Ollama pipeline: one fact-ownership plan, bounded
-parallel section writers, parallel evidence and narrative critics, and targeted
-section repairs. `OLLAMA_PARALLELISM` controls the application worker count.
-The Ollama server must separately allow the same concurrency or requests will
-queue. For a host with enough RAM or VRAM, start with:
+The Ollama path is source-aware and sequential. It hydrates only the selected
+one to five sources into an owner-scoped plain-text block cache, plans four or
+five semantic segments without a title, writes each segment with a compact
+rolling digest, flags semantic duplicates with one batched embedding request,
+consolidates with Redbus, audits with safeguard, and generates title/dek with
+Mistral only after the transcript is immutable. OpenAI and Gemini retain their
+existing generation paths. Planning, writer, consolidation, and review evidence
+packets have strict serialized-size budgets and retain provenance-tagged
+first/middle/last excerpts from oversized blocks. Claim provenance uses assigned
+block IDs with server-derived global source numbers; an invalid model response
+retries only the affected stage rather than restarting or failing the episode.
+
+HTML extraction uses Readability; open-access PDFs use `unpdf`. Downloads are
+DNS-pinned, redirect-checked, MIME-checked, time-bounded, and streamed under the
+limits in `.env.example`. Feed-only sources use captured RSS/Atom bodies and
+never crawl linked pages. For a host with enough RAM or VRAM, start Ollama with:
 
 ```bash
 OLLAMA_NUM_PARALLEL=3 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KEEP_ALIVE=30m ollama serve
 ```
 
-Start with two workers on memory-constrained hosts. Parallel context allocation
-increases memory usage, so verify model placement and allocated context with
-`ollama ps` before raising the worker count. Set `OLLAMA_LOG_TIMINGS=true` to log
-per-stage load, prompt-evaluation, and output-generation timings.
-`OLLAMA_FIRST_TOKEN_TIMEOUT_MS` bounds server queueing, while
-`OLLAMA_IDLE_TIMEOUT_MS` aborts only when an active response stops streaming.
+The new writers are intentionally sequential; document downloads remain bounded
+to two at a time and PDF parsing to one at a time. Verify model placement and
+allocated context with `ollama ps`. `OLLAMA_PIPELINE_LOG_LEVEL=info|debug|off`
+controls metadata-only structured stage logs; source text, transcript text,
+digests, and titles are never logged.
 
 ## Local Chatterbox narrator voice
 
@@ -85,7 +100,8 @@ Episode length, daily generation, and publish time are persisted in Supabase. Th
 Production variables:
 
 - `GEMINI_API_KEY` or `OPENAI_API_KEY` (one is enough; optional `AI_PROVIDER=gemini|openai|ollama|auto`)
-- `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_CONTEXT_SIZE`, `OLLAMA_PARALLELISM`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_LOG_TIMINGS`, `OLLAMA_FIRST_TOKEN_TIMEOUT_MS`, `OLLAMA_IDLE_TIMEOUT_MS`, `LOCAL_TTS_VOICE`, `LOCAL_TTS_RATE` (optional local Ollama/macOS speech settings)
+- `OLLAMA_BASE_URL`, `OLLAMA_SCRIPT_MODEL`, `OLLAMA_CONSOLIDATION_MODEL`, `OLLAMA_REVIEW_MODEL`, `OLLAMA_METADATA_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `OLLAMA_DIGEST_AUDIT_MODE`, `OLLAMA_DEDUP_SIMILARITY_THRESHOLD`, `OLLAMA_PLANNING_SOURCE_MAX_CHARACTERS`, `OLLAMA_SEGMENT_SOURCE_MAX_CHARACTERS`, `OLLAMA_REVIEW_SOURCE_MAX_CHARACTERS`, `OLLAMA_SEMANTIC_BLOCK_MAX_CHARACTERS`, and role-specific context/output/keep-alive settings (local semantic pipeline)
+- `SOURCE_DOCUMENT_FETCH_TIMEOUT_MS`, `SOURCE_DOCUMENT_BATCH_TIMEOUT_MS`, `SOURCE_DOCUMENT_HTML_MAX_BYTES`, `SOURCE_DOCUMENT_PDF_MAX_BYTES`, `SOURCE_DOCUMENT_MAX_CHARACTERS`, `SOURCE_DOCUMENT_MAX_BLOCKS`, and `SOURCE_DOCUMENT_MAX_PDF_PAGES` (selected-source hydration limits)
 - `CHATTERBOX_PYTHON`, `CHATTERBOX_DEVICE`, `CHATTERBOX_CACHE_DIR`, `CHATTERBOX_MAX_TEMPO_ADJUSTMENT`, `CHATTERBOX_MIN_WPM`, `CHATTERBOX_MAX_WPM`, `LOCAL_VOICE_STORAGE_DIR` (optional local Chatterbox settings; out-of-range chunks are retried, then the fastest clear candidate inside a bounded slow-rate tolerance may be retained; fast chunks still fail)
 - `REQUIRE_LOCAL_VOICE=true` to prevent a cron or manual generation from silently falling back to the system voice when no local narrator is configured
 - `GEMINI_TEXT_MODEL`, `GEMINI_TTS_MODEL`, `GEMINI_TTS_VOICE` (optional Gemini overrides)
@@ -134,4 +150,16 @@ npm run lint
 npm test
 ```
 
-Unit tests cover canonical identities, deduplication, ranking, source diversity, RSS parsing, speech chunking, and XML escaping.
+Unit tests cover canonical identities, semantic planning and deduplication,
+claim provenance, title warnings, dynamic chapters, structured HTML/PDF/feed
+extraction, SSRF/redirect/size/timeout defenses, ranking, speech chunking, and XML
+escaping.
+
+For local similarity calibration without transcript text in normal server logs:
+
+```bash
+npm run calibrate:dedup -- /path/to/transcript.txt 0.85
+```
+
+Add `--show-text` only when you explicitly want sentence text printed in that
+local terminal.

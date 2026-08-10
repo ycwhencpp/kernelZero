@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { sourceSelectionCoverage } from "../lib/domain";
+import {
+  limitPodcastSourceIds,
+  MAX_OLLAMA_PODCAST_SOURCES,
+  uniquePodcastSourceIds,
+} from "../lib/podcast-source-selection";
 import { loadAllPaginatedRows } from "../lib/supabase-pagination";
 import type { ContentItem } from "../lib/types";
 
@@ -90,4 +95,31 @@ test("source coverage has no hidden cap when every selected source is ready", ()
   assert.equal(selection.readySourceCount, 134);
   assert.equal(selection.unavailableSourceCount, 0);
   assert.equal(selection.selectedItems.length, 134);
+});
+
+test("Ollama source request normalization deduplicates IDs without reordering them", () => {
+  assert.deepEqual(
+    uniquePodcastSourceIds([
+      "source-three",
+      "source-one",
+      "source-three",
+      " ",
+      null,
+      "source-two",
+    ]),
+    ["source-three", "source-one", "source-two"],
+  );
+});
+
+test("legacy Ollama regeneration retains the first five unique source IDs", () => {
+  const sourceIds = Array.from({ length: 7 }, (_, index) => `source-${index + 1}`);
+  const limited = limitPodcastSourceIds(sourceIds);
+
+  assert.equal(MAX_OLLAMA_PODCAST_SOURCES, 5);
+  assert.deepEqual(limited.itemIds, sourceIds.slice(0, 5));
+  assert.equal(limited.omittedCount, 2);
+  assert.deepEqual(
+    limitPodcastSourceIds(sourceIds.slice(0, 5)),
+    { itemIds: sourceIds.slice(0, 5), omittedCount: 0 },
+  );
 });

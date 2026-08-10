@@ -1,5 +1,7 @@
 import { redirect } from "next/navigation";
 import { currentUser } from "../lib/auth";
+import { resolveAiProvider } from "../lib/ai-config";
+import { MAX_OLLAMA_PODCAST_SOURCES } from "../lib/podcast-source-selection";
 import { getDashboardState } from "../lib/store";
 import type { OrganicView } from "./components/organic/app-shell";
 import { DashboardClient } from "./dashboard-client";
@@ -39,6 +41,11 @@ export async function WorkspacePage({
       initialView={initialView}
       initialEpisodeId={initialEpisodeId}
       initialReviewReturnView={initialReviewReturnView}
+      generationSourceLimit={
+        resolveAiProvider() === "ollama"
+          ? MAX_OLLAMA_PODCAST_SOURCES
+          : null
+      }
     />
   );
 }
