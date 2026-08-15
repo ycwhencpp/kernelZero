@@ -1,9 +1,22 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { sourceSelectionCoverage } from "../../lib/domain";
+import { type FormEvent, useMemo, useState } from "react";
+import {
+  briefingTopicId,
+  buildBriefingTopicCards,
+} from "../../lib/domain";
 import { episodeLengthProfile } from "../../lib/podcast-length";
+import { MAX_BRIEFING_SOURCES } from "../../lib/podcast-source-selection";
 import type { DashboardState, EpisodeLength } from "../../lib/types";
+
+const DEFAULT_BRIEFING_TOPICS = [
+  "Backend",
+  "AI",
+  "LLM",
+  "Infrastructure",
+  "GPT",
+  "Claude",
+] as const;
 
 export function OrganicCreateView({
   state,
@@ -15,48 +28,113 @@ export function OrganicCreateView({
 }: {
   state: DashboardState;
   onBack: () => void;
-  onStart: (itemIds: string[], episodeLength: EpisodeLength) => void;
+  onStart: (
+    itemIds: string[],
+    episodeLength: EpisodeLength,
+    focusTopic: string,
+  ) => void;
   onAddSource: () => void;
   busy: string | null;
   sourceLimit: number | null;
 }) {
   const sources = state.sources;
-  const sourceIdsWithContent = useMemo(
-    () =>
-      new Set(
-        state.items.flatMap((item) => item.sourceId ? [item.sourceId] : []),
-      ),
-    [state.items],
-  );
-  const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>(() =>
-    sources
-      .filter((source) => sourceIdsWithContent.has(source.id))
-      .slice(0, 2)
-      .map((source) => source.id),
-  );
+  const requestedSourceLimit = sourceLimit ?? MAX_BRIEFING_SOURCES;
+  const briefingSourceLimit = Number.isFinite(requestedSourceLimit)
+    ? Math.max(
+        1,
+        Math.min(MAX_BRIEFING_SOURCES, Math.floor(requestedSourceLimit)),
+      )
+    : MAX_BRIEFING_SOURCES;
   const [depth, setDepth] = useState<EpisodeLength>(state.settings.episodeLength);
   const [generationTime, setGenerationTime] = useState("08:00");
   const [weekdays, setWeekdays] = useState([true, true, true, true, true, false, false]);
   const [distribution, setDistribution] = useState({ spotify: true, apple: false });
-  const sourceSelection = useMemo(
-    () => sourceSelectionCoverage(state.items, selectedSourceIds),
-    [state.items, selectedSourceIds],
+  const [customTopics, setCustomTopics] = useState<string[]>([]);
+  const [topicDraft, setTopicDraft] = useState("");
+  const [topicMessage, setTopicMessage] = useState<string | null>(null);
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
+  const sourceById = useMemo(
+    () => new Map(sources.map((source) => [source.id, source])),
+    [sources],
   );
-  const selectedItems = sourceSelection.selectedItems;
-  const readySourceIds = useMemo(
-    () => sources
-      .filter((source) => sourceIdsWithContent.has(source.id))
-      .map((source) => source.id),
-    [sourceIdsWithContent, sources],
+  const enabledSourceIds = useMemo(
+    () => sources.filter((source) => source.enabled).map((source) => source.id),
+    [sources],
   );
-  const bulkSelectionIds = sourceLimit === null
-    ? sources.map((source) => source.id)
-    : readySourceIds.slice(0, sourceLimit);
-  const allBulkSourcesSelected =
-    bulkSelectionIds.length > 0 &&
-    bulkSelectionIds.every((sourceId) => selectedSourceIds.includes(sourceId));
-  const readySourceLimitReached =
-    sourceLimit !== null && sourceSelection.readySourceCount >= sourceLimit;
+  const preferredTopics = useMemo(
+    () => [
+      ...customTopics,
+      ...DEFAULT_BRIEFING_TOPICS,
+      ...state.interests
+        .filter((interest) => interest.enabled)
+        .flatMap((interest) => [interest.name, ...interest.keywords]),
+    ],
+    [customTopics, state.interests],
+  );
+  const topicCards = useMemo(
+    () => buildBriefingTopicCards(state.items, preferredTopics, {
+      sourceIds: enabledSourceIds,
+      limit: briefingSourceLimit,
+      requireFullCard: true,
+    }),
+    [briefingSourceLimit, enabledSourceIds, preferredTopics, state.items],
+  );
+  const defaultTopicCard = topicCards[0] ?? null;
+  const selectedTopicCard =
+    topicCards.find((card) => card.id === selectedTopicId) ?? defaultTopicCard;
+  const selectedItems = selectedTopicCard?.items ?? [];
+  const selectedSourceCount = new Set(
+    selectedItems.flatMap((item) => item.sourceId ? [item.sourceId] : []),
+  ).size;
+
+  const addTopicCards = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const requestedTopics = [...new Map(
+      topicDraft
+        .split(",")
+        .map((topic) => topic.trim().replace(/\s+/g, " "))
+        .filter(Boolean)
+        .map((topic) => [briefingTopicId(topic), topic]),
+    ).values()];
+    if (requestedTopics.length === 0) {
+      setTopicMessage("Enter a topic such as Backend, AI, LLM, GPT, or Claude.");
+      return;
+    }
+
+    const matchedTopics: string[] = [];
+    const unmatchedTopics: string[] = [];
+    for (const topic of requestedTopics) {
+      const existing = topicCards.find((card) => card.id === briefingTopicId(topic));
+      const card = existing ?? buildBriefingTopicCards(state.items, [topic], {
+        sourceIds: enabledSourceIds,
+        limit: briefingSourceLimit,
+        includeInferredTopics: false,
+        requireFullCard: true,
+      })[0];
+      if (!card) {
+        unmatchedTopics.push(topic);
+        continue;
+      }
+      matchedTopics.push(topic);
+      setSelectedTopicId(card.id);
+    }
+
+    if (matchedTopics.length > 0) {
+      setCustomTopics((current) => {
+        const existingIds = new Set(current.map(briefingTopicId));
+        return [
+          ...matchedTopics.filter((topic) => !existingIds.has(briefingTopicId(topic))),
+          ...current,
+        ];
+      });
+      setTopicDraft("");
+    }
+    setTopicMessage(
+      unmatchedTopics.length > 0
+        ? `Fewer than ${briefingSourceLimit} connected sources have ready matching blogs for ${unmatchedTopics.map((topic) => `“${topic}”`).join(", ")}. Add or refresh sources to create those cards.`
+        : `${matchedTopics.length === 1 ? "Topic card added" : `${matchedTopics.length} topic cards added`}.`,
+    );
+  };
 
   return (
     <div className="organic-create">
@@ -75,75 +153,112 @@ export function OrganicCreateView({
         <span className="organic-pill organic-pill-lime">CONFIGURATION MODE</span>
         <h1>Create New Briefing</h1>
         <p>
-          Connect trusted sources, set narrative depth, and schedule automated distribution for your
-          next AI-produced episode.
+          Choose a topic and we’ll combine the strongest matching blogs from five trusted
+          sources into one briefing.
         </p>
       </div>
 
       <div className="organic-create-grid">
-        <article className="organic-panel">
+        <article className="organic-panel span-2 organic-topic-panel">
           <div className="organic-panel-head">
-            <h3>Source Selection</h3>
-            <button
-              type="button"
-              className="organic-text-link lime"
-              aria-pressed={allBulkSourcesSelected}
-              disabled={bulkSelectionIds.length === 0}
-              onClick={() =>
-                setSelectedSourceIds(
-                  allBulkSourcesSelected ? [] : bulkSelectionIds,
-                )
-              }
-            >
-              {allBulkSourcesSelected
-                ? "Clear all"
-                : sourceLimit !== null && readySourceIds.length > sourceLimit
-                  ? `Select first ${sourceLimit}`
-                  : "Select all"}
+            <div>
+              <h3>Choose a Podcast Topic</h3>
+              <p>
+                Each card combines the best matching blog from five different sources.
+              </p>
+            </div>
+            <button type="button" className="organic-text-link lime" onClick={onAddSource}>
+              Connect sources
             </button>
           </div>
-          <div className="organic-source-pick-grid">
-            {sources.map((source) => {
-              const selected = selectedSourceIds.includes(source.id);
-              const hasContent = sourceIdsWithContent.has(source.id);
-              const disabledByLimit =
-                !selected && hasContent && readySourceLimitReached;
-              return (
-              <button
-                key={source.id}
-                type="button"
-                className={`organic-source-pick ${selected ? "is-selected" : ""}`}
-                aria-pressed={selected}
-                disabled={disabledByLimit}
-                onClick={() =>
-                  setSelectedSourceIds((current) =>
-                    current.includes(source.id)
-                      ? current.filter((id) => id !== source.id)
-                      : [...current, source.id],
-                  )
-                }
-              >
-                {selected && <span className="check">✓</span>}
-                <strong>{source.name}</strong>
-                <small>
-                  {source.type.toUpperCase()} · {hasContent ? "READY" : "NO CONTENT"}
-                </small>
+
+          <form className="organic-topic-add" onSubmit={addTopicCards}>
+            <label htmlFor="briefing-topics">Add topic cards</label>
+            <div>
+              <input
+                id="briefing-topics"
+                value={topicDraft}
+                onChange={(event) => {
+                  setTopicDraft(event.target.value);
+                  setTopicMessage(null);
+                }}
+                placeholder="Backend, AI, LLM, Infrastructure, GPT, Claude…"
+              />
+              <button type="submit" className="organic-btn organic-btn-dark">
+                Add topic
               </button>
-            ); })}
-            <button type="button" className="organic-source-pick dashed" onClick={onAddSource}>
-              Connect New Source
-            </button>
-          </div>
-          {sourceLimit !== null && readySourceIds.length > sourceLimit && (
-            <p className="organic-panel-copy" role="status">
-              Local Ollama generation accepts up to {sourceLimit} ready sources.
-              {readySourceLimitReached && " Deselect one to choose a different source."}
-            </p>
+            </div>
+            <small>Separate multiple topics with commas.</small>
+          </form>
+          {topicMessage && (
+            <p className="organic-topic-message" role="status">{topicMessage}</p>
           )}
-          {sourceSelection.unavailableSourceCount > 0 && (
-            <p className="organic-panel-copy" role="status">
-              {sourceSelection.unavailableSourceCount} selected {sourceSelection.unavailableSourceCount === 1 ? "source has" : "sources have"} no imported content yet and will be skipped. Refresh them from Sources.
-            </p>
+
+          {topicCards.length > 0 ? (
+            <div className="organic-topic-card-grid" role="radiogroup" aria-label="Podcast topics">
+              {topicCards.map((card) => {
+                const selected = card.id === selectedTopicCard?.id;
+                return (
+                  <label
+                    key={card.id}
+                    className={`organic-topic-card ${selected ? "is-selected" : ""}`}
+                  >
+                    <input
+                      type="radio"
+                      name="briefing-topic"
+                      value={card.id}
+                      checked={selected}
+                      aria-label={`${card.topic}, ${briefingSourceLimit} sources`}
+                      onChange={() => setSelectedTopicId(card.id)}
+                    />
+                    <span className="organic-topic-card-head">
+                      <span>
+                        <small>Podcast on</small>
+                        <strong>{card.topic}</strong>
+                      </span>
+                      <span className="organic-topic-card-count">
+                        {card.items.length} / {briefingSourceLimit} sources
+                      </span>
+                    </span>
+                    <span className="organic-topic-blog-list">
+                      {card.items.map((item, index) => {
+                        const source = item.sourceId ? sourceById.get(item.sourceId) : undefined;
+                        return (
+                          <span key={item.id} className="organic-topic-blog-row">
+                            <span className="organic-topic-blog-index" aria-hidden="true">
+                              {String(index + 1).padStart(2, "0")}
+                            </span>
+                            <span className="organic-topic-blog-copy">
+                              <strong>{item.title}</strong>
+                              <small>{source?.name ?? item.sourceName}</small>
+                            </span>
+                          </span>
+                        );
+                      })}
+                    </span>
+                    <span className="organic-topic-card-foot">
+                      <span>
+                        {card.availableBlogCount > card.items.length
+                          ? `${card.availableBlogCount} matching blogs across ${card.availableSourceCount} sources`
+                          : "Best matching blog from each source"}
+                      </span>
+                      <strong>{selected ? "Selected ✓" : "Select"}</strong>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="organic-topic-empty">
+              <strong>No topic cards are ready yet.</strong>
+              <p>
+                Each topic needs ready matching blogs from {briefingSourceLimit} different
+                connected sources. Connect or refresh sources to complete a card.
+              </p>
+              <button type="button" className="organic-btn organic-btn-dark" onClick={onAddSource}>
+                Connect a source
+              </button>
+            </div>
           )}
         </article>
 
@@ -163,21 +278,6 @@ export function OrganicCreateView({
                 <option value="local">Local system voice</option>
             </select>
           </label>
-        </article>
-
-        <article className="organic-panel span-2">
-          <div className="organic-panel-head">
-            <h3>Focus &amp; Interests</h3>
-            <span className="organic-pill organic-pill-lime small">3 Active Filters</span>
-          </div>
-          <div className="organic-tag-list">
-            {state.interests.filter((interest) => interest.enabled).map((interest) => (
-              <span key={interest.id} className="organic-tag lime">
-                {interest.name}
-              </span>
-            ))}
-          </div>
-          <input placeholder="Add specific keyword or topic..." className="organic-input" />
         </article>
 
         <article className="organic-panel">
@@ -207,22 +307,20 @@ export function OrganicCreateView({
           <h3>Briefing Summary</h3>
           <ul>
             <li>
-              <span>Sources Selected</span>
-              <strong>{sourceSelection.selectedSourceCount}</strong>
+              <span>Topic</span>
+              <strong>{selectedTopicCard?.topic ?? "None selected"}</strong>
             </li>
             <li>
-              <span>Ready Sources</span>
-              <strong>{sourceSelection.readySourceCount}</strong>
+              <span>Blogs Selected</span>
+              <strong>{selectedItems.length}</strong>
             </li>
-            {sourceSelection.unavailableSourceCount > 0 && (
-              <li>
-                <span>Awaiting Content</span>
-                <strong>{sourceSelection.unavailableSourceCount}</strong>
-              </li>
-            )}
+            <li>
+              <span>Connected Sources</span>
+              <strong>{selectedSourceCount}</strong>
+            </li>
             <li>
               <span>Selection Rule</span>
-              <strong>Top item per source</strong>
+              <strong>Best blog per source</strong>
             </li>
             <li>
               <span>Estimated Length</span>
@@ -237,15 +335,34 @@ export function OrganicCreateView({
             type="button"
             className="organic-btn organic-btn-dark block"
             disabled={busy !== null || selectedItems.length === 0}
-            onClick={() => onStart(selectedItems.map((item) => item.id), depth)}
+            onClick={() => {
+              if (!selectedTopicCard) return;
+              onStart(
+                selectedItems.map((item) => item.id),
+                depth,
+                selectedTopicCard.topic,
+              );
+            }}
           >
             {busy
               ? "Starting…"
               : selectedItems.length
-                ? `START PIPELINE (${selectedItems.length} ready sources)`
+                ? `START PIPELINE (${selectedItems.length} blogs)`
                 : "START PIPELINE"}
           </button>
-          <button type="button" className="organic-btn organic-btn-outline block" onClick={() => onStart(selectedItems.slice(0, 1).map((item) => item.id), depth)} disabled={busy !== null || selectedItems.length === 0}>
+          <button
+            type="button"
+            className="organic-btn organic-btn-outline block"
+            onClick={() => {
+              if (!selectedTopicCard) return;
+              onStart(
+                selectedItems.map((item) => item.id),
+                "brief",
+                selectedTopicCard.topic,
+              );
+            }}
+            disabled={busy !== null || selectedItems.length === 0}
+          >
             Generate Preview
           </button>
         </article>

@@ -1,20 +1,31 @@
 export type AiProvider = "openai" | "gemini" | "ollama";
 
-export function resolveAiProvider(): AiProvider | null {
-  const mode = (process.env.AI_PROVIDER ?? "auto").toLowerCase();
-  if (mode === "openai") {
+function resolveAiProviderMode(mode: string): AiProvider | null {
+  const normalizedMode = mode.trim().toLowerCase();
+  if (normalizedMode === "openai") {
     return process.env.OPENAI_API_KEY ? "openai" : null;
   }
-  if (mode === "gemini") {
+  if (normalizedMode === "gemini") {
     return process.env.GEMINI_API_KEY ? "gemini" : null;
   }
-  if (mode === "ollama") return "ollama";
-  if (mode === "auto") {
+  if (normalizedMode === "ollama") return "ollama";
+  if (normalizedMode === "auto") {
     if (process.env.GEMINI_API_KEY) return "gemini";
     if (process.env.OPENAI_API_KEY) return "openai";
     return "ollama";
   }
   return null;
+}
+
+export function resolveAiProvider(): AiProvider | null {
+  return resolveAiProviderMode(process.env.AI_PROVIDER ?? "auto");
+}
+
+export function resolveLinkedInPostProvider(): AiProvider | null {
+  const override = process.env.LINKEDIN_POST_PROVIDER;
+  return override?.trim()
+    ? resolveAiProviderMode(override)
+    : resolveAiProvider();
 }
 
 export function aiProviderLabel(provider: AiProvider | null): string {

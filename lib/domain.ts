@@ -227,6 +227,189 @@ export function sourceSelectionCoverage(
   };
 }
 
+export type BriefingTopicCard = {
+  id: string;
+  topic: string;
+  items: ContentItem[];
+  availableBlogCount: number;
+  availableSourceCount: number;
+};
+
+const BRIEFING_TOPIC_ALIASES: Record<string, readonly string[]> = {
+  ai: ["ai", "artificial intelligence", "machine learning", "generative ai"],
+  backend: [
+    "backend",
+    "back end",
+    "server side",
+    "api",
+    "database",
+    "microservice",
+    "microservices",
+  ],
+  claude: ["claude", "anthropic"],
+  gpt: ["gpt", "chatgpt"],
+  infrastructure: [
+    "infrastructure",
+    "infra",
+    "cloud infrastructure",
+    "distributed systems",
+    "platform engineering",
+    "cloud",
+    "devops",
+    "kubernetes",
+    "observability",
+  ],
+  llm: ["llm", "llms", "large language model", "large language models"],
+};
+
+function normalizeBriefingTopic(value: string): string {
+  return value
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+export function briefingTopicId(topic: string): string {
+  return `briefing-topic:${normalizeBriefingTopic(topic)}`;
+}
+
+function containsTopicPhrase(text: string, phrase: string): boolean {
+  return ` ${text} `.includes(` ${phrase} `);
+}
+
+function briefingTopicMatchScore(item: ContentItem, topic: string): number {
+  const topicKey = normalizeBriefingTopic(topic);
+  if (!topicKey) return 0;
+  const variants = (BRIEFING_TOPIC_ALIASES[topicKey] ?? [topicKey])
+    .map(normalizeBriefingTopic);
+  const normalizedTopics = item.topics.map(normalizeBriefingTopic);
+  const title = normalizeBriefingTopic(item.title);
+  const summary = normalizeBriefingTopic(item.summary);
+  const sourceName = normalizeBriefingTopic(item.sourceName);
+
+  let relevance = 0;
+  for (const variant of variants) {
+    if (normalizedTopics.some((value) => value === variant)) {
+      relevance = Math.max(relevance, 100);
+    } else if (normalizedTopics.some((value) => containsTopicPhrase(value, variant))) {
+      relevance = Math.max(relevance, 80);
+    }
+    if (containsTopicPhrase(title, variant)) relevance = Math.max(relevance, 65);
+    if (containsTopicPhrase(summary, variant)) relevance = Math.max(relevance, 35);
+    if (containsTopicPhrase(sourceName, variant)) relevance = Math.max(relevance, 20);
+  }
+
+  if (relevance === 0) {
+    const queryTokens = topicKey.split(" ").filter((token) => token.length > 2);
+    const document = `${title} ${summary} ${normalizedTopics.join(" ")} ${sourceName}`;
+    if (
+      queryTokens.length > 1 &&
+      queryTokens.every((token) => containsTopicPhrase(document, token))
+    ) {
+      relevance = 15;
+    }
+  }
+
+  return relevance;
+}
+
+export function buildBriefingTopicCards(
+  items: readonly ContentItem[],
+  preferredTopics: readonly string[] = [],
+  options: {
+    sourceIds?: readonly string[];
+    limit?: number;
+    includeInferredTopics?: boolean;
+    requireFullCard?: boolean;
+  } = {},
+): BriefingTopicCard[] {
+  const requestedLimit = options.limit ?? 5;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.min(5, Math.max(0, Math.floor(requestedLimit)))
+    : 0;
+  if (limit === 0) return [];
+
+  const allowedSourceIds = options.sourceIds
+    ? new Set(options.sourceIds)
+    : null;
+  const eligibleItems = items.filter((item) => {
+    const sourceId = item.sourceId;
+    return item.kind === "blog" &&
+      item.processingState === "ready" &&
+      typeof sourceId === "string" &&
+      (!allowedSourceIds || allowedSourceIds.has(sourceId));
+  });
+  if (eligibleItems.length === 0) return [];
+
+  const topics: string[] = [];
+  const seenTopics = new Set<string>();
+  const addTopic = (value: string) => {
+    const topic = value.trim().replace(/\s+/g, " ");
+    const key = normalizeBriefingTopic(topic);
+    if (!key || seenTopics.has(key)) return;
+    seenTopics.add(key);
+    topics.push(topic);
+  };
+  preferredTopics.forEach(addTopic);
+  const preferredTopicCount = topics.length;
+  if (options.includeInferredTopics !== false) {
+    eligibleItems.forEach((item) => item.topics.forEach(addTopic));
+  }
+
+  const cards: BriefingTopicCard[] = [];
+  const seenItemSets = new Set<string>();
+  for (const [topicIndex, topic] of topics.entries()) {
+    const matches = eligibleItems
+      .map((item) => ({ item, relevance: briefingTopicMatchScore(item, topic) }))
+      .filter((candidate) => candidate.relevance > 0)
+      .sort((a, b) =>
+        b.relevance - a.relevance ||
+        b.item.score - a.item.score ||
+        b.item.publishedAt.localeCompare(a.item.publishedAt) ||
+        a.item.id.localeCompare(b.item.id)
+      );
+    if (matches.length === 0) continue;
+
+    const sourceIds = new Set<string>();
+    const contentIds = new Set<string>();
+    const selectedItems: ContentItem[] = [];
+    for (const { item } of matches) {
+      const contentId = canonicalIdentifier(item);
+      if (
+        !item.sourceId ||
+        sourceIds.has(item.sourceId) ||
+        contentIds.has(contentId)
+      ) continue;
+      sourceIds.add(item.sourceId);
+      contentIds.add(contentId);
+      selectedItems.push(item);
+      if (selectedItems.length === limit) break;
+    }
+    if (
+      selectedItems.length === 0 ||
+      (options.requireFullCard && selectedItems.length !== limit)
+    ) continue;
+
+    const itemSetKey = selectedItems.map((item) => item.id).sort().join("\u0000");
+    if (topicIndex >= preferredTopicCount && seenItemSets.has(itemSetKey)) continue;
+    seenItemSets.add(itemSetKey);
+
+    cards.push({
+      id: briefingTopicId(topic),
+      topic,
+      items: selectedItems,
+      availableBlogCount: matches.length,
+      availableSourceCount: new Set(
+        matches.flatMap(({ item }) => item.sourceId ? [item.sourceId] : []),
+      ).size,
+    });
+  }
+
+  return cards;
+}
+
 export function hasBudgetForGeneration(
   spentUsd: number,
   budgetUsd: number,

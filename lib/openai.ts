@@ -36,6 +36,7 @@ import {
   podcastRegenerationInstruction,
   type PodcastRegenerationContext,
 } from "./podcast-regeneration";
+import { podcastFocusInstruction } from "./podcast-focus";
 import {
   openAiSpeechModelSupportsInstructions,
   PODCAST_AUDIO_DELIVERY_INSTRUCTION,
@@ -162,6 +163,7 @@ async function createStructuredPodcast(
   episodeType: Episode["type"],
   episodeLength: EpisodeLength,
   regeneration?: PodcastRegenerationContext | null,
+  focusTopic?: string,
 ): Promise<PodcastDraft> {
   const env = runtimeEnv();
   if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
@@ -196,6 +198,7 @@ async function createStructuredPodcast(
 
 Required arc: why it matters; background; method or mechanism; findings; limitations; practical impact; what to watch next. Begin with the required KernelZero greeting and an episode-specific orientation that tells listeners what story they are about to hear, what they will understand, and why it matters before introducing technical details. Build depth through clear explanations, source-by-source comparisons, transitions, and uncertainty—not repetition or invented facts. A fact is already covered even if another source describes it in different words. Do not repeat an event, example, number, mechanism, finding, or explanation across paragraphs. Do not read citations aloud, but make show notes source-complete. The claim ledger must cover every quantitative or attributed claim.
 ${podcastRegenerationInstruction(regeneration)}
+${podcastFocusInstruction(focusTopic)}
 
 SOURCE PACKET:
 ${JSON.stringify(podcastSourcePacket(items))}`,
@@ -477,6 +480,7 @@ export async function generatePodcast(
     voiceProfile?: ActiveVoiceProfile | null;
     episodeLength?: EpisodeLength;
     regeneration?: PodcastRegenerationContext | null;
+    focusTopic?: string;
     episodeId?: string;
     /** Hydrated, provenance-carrying corpus used only by the Ollama pipeline. */
     sourceCorpus?: ollama.SemanticPodcastInput;
@@ -505,6 +509,7 @@ export async function generatePodcast(
       type,
       episodeLength,
       options.regeneration,
+      options.focusTopic,
     );
   } else if (provider === "ollama") {
     const semantic = await ollama.createSemanticPodcast(
@@ -513,6 +518,7 @@ export async function generatePodcast(
       episodeLength,
       {
         traceId: options.traceId,
+        editorialFocus: options.focusTopic,
         regenerationFeedback: options.regeneration
           ? [
               "Create a meaningfully revised structure from the source corpus.",
@@ -530,6 +536,7 @@ export async function generatePodcast(
       type,
       episodeLength,
       options.regeneration,
+      options.focusTopic,
     );
   }
 

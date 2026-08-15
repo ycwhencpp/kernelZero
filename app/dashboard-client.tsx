@@ -325,6 +325,7 @@ export function DashboardClient({
       episode: Episode;
       currentDraft: string;
     },
+    focusTopic?: string,
   ) => {
     setBusy(
       regeneration
@@ -338,7 +339,7 @@ export function DashboardClient({
             regeneration.episode,
             regeneration.currentDraft,
           )
-        : { type, itemIds, includeAudio: true, episodeLength };
+        : { type, itemIds, includeAudio: true, episodeLength, focusTopic };
       const payload = await requestJson<{
         episode: Episode;
         provider: "openai" | "gemini" | "ollama";
@@ -1236,7 +1237,15 @@ export function DashboardClient({
           <OrganicCreateView
             state={state}
             onBack={() => navigate("dashboard")}
-            onStart={(itemIds, episodeLength) => void generateEpisode("daily_digest", itemIds, episodeLength)}
+            onStart={(itemIds, episodeLength, focusTopic) =>
+              void generateEpisode(
+                "daily_digest",
+                itemIds,
+                episodeLength,
+                undefined,
+                focusTopic,
+              )
+            }
             onAddSource={() => setModal("source")}
             busy={busy}
             sourceLimit={generationSourceLimit}

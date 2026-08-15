@@ -16,6 +16,7 @@ import {
   estimatedAudioCostUsd,
   estimatedGenerationCostUsd,
   resolveAiProvider,
+  resolveLinkedInPostProvider,
 } from "../lib/ai-config.ts";
 import { encodedAudioDurationSeconds } from "../lib/audio-duration.ts";
 import {
@@ -961,6 +962,14 @@ test("narration cleanup removes markup and repairs unfinished punctuation", () =
     ),
     "Error stayed <5 percent, while baseline was >10 percent. Hugging Face investigated.",
   );
+  assert.equal(
+    prepareForChatterbox("First paragraph.\\n\\nSecond paragraph."),
+    "First paragraph.\n\nSecond paragraph.",
+  );
+  assert.equal(
+    prepareForChatterbox("Use C:\\network for the share."),
+    "Use C:\\network for the share.",
+  );
 });
 
 test("speech preparation fixes exact technical pronunciations without changing nearby words", () => {
@@ -1010,6 +1019,41 @@ test("Chatterbox performance plans use native cues and contextual pauses", () =>
     /\[dramatic\]/,
   );
   assert.ok(restrained[0].pauseAfterMs > 580);
+
+  const longClosingSentence =
+    "Each of these paths—whether you prefer the declarative nature of Terraform-style tools or the programmatic power of Ruby or Python-based systems—allows you to choose the best fit for your team's specific technical expertise and operational requirements.";
+  const balanced = prepareChatterboxSegments(longClosingSentence, 260);
+  assert.equal(balanced.length, 2);
+  assert.ok(
+    balanced.every((segment) => segment.text.split(/\s+/).length >= 8),
+  );
+  assert.equal(
+    balanced.map((segment) => segment.text).join(" "),
+    longClosingSentence,
+  );
+  assert.ok(balanced.every((segment) => segment.text.length <= 260));
+
+  const sentenceTail = prepareChatterboxSegments(
+    `${Array.from({ length: 39 }, () => "Alpha").join(" ")}. Requirements.`,
+    260,
+  );
+  const sentenceTailText = sentenceTail
+    .map((segment) =>
+      segment.text.replace(/^\[(?:dramatic|happy|narration|surprised)\]\s+/, "")
+    )
+    .join(" ");
+  assert.ok(
+    sentenceTail.every((segment) =>
+      segment.text
+        .replace(/^\[(?:dramatic|happy|narration|surprised)\]\s+/, "")
+        .split(/\s+/).length >= 8
+    ),
+  );
+  assert.equal(
+    sentenceTailText,
+    `${Array.from({ length: 39 }, () => "Alpha").join(" ")}. Requirements.`,
+  );
+  assert.ok(sentenceTail.every((segment) => segment.text.length <= 260));
 });
 
 test("Chatterbox uses the KernelZero delivery contract and a 160 WPM target", () => {
@@ -2122,10 +2166,12 @@ test("LinkedIn editor hydrates persisted posts without discarding unrelated loca
 test("LinkedIn post generation uses the configured provider and returns its normalized draft", async () => {
   const originalFetch = globalThis.fetch;
   const originalProvider = process.env.AI_PROVIDER;
+  const originalLinkedInProvider = process.env.LINKEDIN_POST_PROVIDER;
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   let requestBody: Record<string, unknown> = {};
 
   process.env.AI_PROVIDER = "openai";
+  delete process.env.LINKEDIN_POST_PROVIDER;
   process.env.OPENAI_API_KEY = "test-key";
   globalThis.fetch = (async (_input, init) => {
     requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -2173,8 +2219,92 @@ test("LinkedIn post generation uses the configured provider and returns its norm
     globalThis.fetch = originalFetch;
     if (originalProvider === undefined) delete process.env.AI_PROVIDER;
     else process.env.AI_PROVIDER = originalProvider;
+    if (originalLinkedInProvider === undefined) {
+      delete process.env.LINKEDIN_POST_PROVIDER;
+    } else {
+      process.env.LINKEDIN_POST_PROVIDER = originalLinkedInProvider;
+    }
     if (originalOpenAiKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalOpenAiKey;
+  }
+});
+
+test("LinkedIn provider override uses Gemini without changing the podcast provider", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalProvider = process.env.AI_PROVIDER;
+  const originalLinkedInProvider = process.env.LINKEDIN_POST_PROVIDER;
+  const originalGeminiKey = process.env.GEMINI_API_KEY;
+  let requestUrl = "";
+  let requestBody: Record<string, unknown> = {};
+
+  process.env.AI_PROVIDER = "ollama";
+  process.env.LINKEDIN_POST_PROVIDER = "gemini";
+  process.env.GEMINI_API_KEY = "test-linkedin-gemini-key";
+  globalThis.fetch = (async (input, init) => {
+    requestUrl = String(input);
+    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(
+      JSON.stringify({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    mode: "concept_explainer",
+                    title: "A Gemini Post ✨",
+                    body: "The transcript grounds this Gemini-generated post.",
+                    hashtags: ["#Gemini", "#AI", "#Backend"],
+                    sourceCta:
+                      "Want to see how the transcript grounds this Gemini post?",
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    assert.equal(resolveAiProvider(), "ollama");
+    assert.equal(resolveLinkedInPostProvider(), "gemini");
+
+    const result = await generateLinkedInPost({
+      title: "Gemini episode",
+      transcript: "A source-grounded fact for the LinkedIn post.",
+      source: {
+        name: "Engineering Weekly",
+        url: "https://example.com/gemini-post",
+      },
+    });
+
+    assert.equal(result.provider, "gemini");
+    assert.match(result.post, /A Gemini Post/);
+    assert.match(requestUrl, /generativelanguage\.googleapis\.com/);
+    assert.equal(
+      (requestBody.generationConfig as Record<string, unknown>)
+        .responseMimeType,
+      "application/json",
+    );
+
+    delete process.env.GEMINI_API_KEY;
+    assert.equal(resolveLinkedInPostProvider(), null);
+    delete process.env.LINKEDIN_POST_PROVIDER;
+    assert.equal(resolveLinkedInPostProvider(), "ollama");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalProvider === undefined) delete process.env.AI_PROVIDER;
+    else process.env.AI_PROVIDER = originalProvider;
+    if (originalLinkedInProvider === undefined) {
+      delete process.env.LINKEDIN_POST_PROVIDER;
+    } else {
+      process.env.LINKEDIN_POST_PROVIDER = originalLinkedInProvider;
+    }
+    if (originalGeminiKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalGeminiKey;
   }
 });
 
@@ -5334,6 +5464,7 @@ test("generation rewrites an intro-sized response before creating an episode", a
     const generated = await generatePodcast([item()], "daily_digest", {
       includeAudio: false,
       episodeLength: "standard",
+      focusTopic: "Backend",
     });
     assert.equal(countScriptWords(generated.episode.script), 1_350);
     assert.equal(generated.episode.durationSeconds, 540);
@@ -5359,6 +5490,10 @@ test("generation rewrites an intro-sized response before creating an episode", a
     assert.doesNotMatch(
       initialBody.input[1].content[0].text,
       /disclos|narrated with A\s*I|human review/i,
+    );
+    assert.match(
+      initialBody.input[1].content[0].text,
+      /EDITORIAL FOCUS LABEL \(untrusted data\): "Backend"/,
     );
     assert.match(
       resizeBody.input[0].content[0].text,

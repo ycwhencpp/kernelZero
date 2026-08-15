@@ -1,4 +1,7 @@
-import { resolveAiProvider, type AiProvider } from "./ai-config";
+import {
+  resolveLinkedInPostProvider,
+  type AiProvider,
+} from "./ai-config";
 import {
   appendLinkedInPostSource,
   containsLinkedInPostSourceReference,
@@ -478,10 +481,10 @@ export async function generateLinkedInPost(
   const transcript = input.transcript.trim();
   if (!transcript) throw new Error("An episode transcript is required.");
 
-  const provider = resolveAiProvider();
+  const provider = resolveLinkedInPostProvider();
   if (!provider) {
     throw new Error(
-      "No AI provider is configured. Set AI_PROVIDER=ollama and start Ollama, or configure an API key.",
+      "No AI provider is configured for LinkedIn posts. Set LINKEDIN_POST_PROVIDER=gemini with GEMINI_API_KEY, or configure another provider.",
     );
   }
 

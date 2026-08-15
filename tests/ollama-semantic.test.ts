@@ -26,6 +26,7 @@ import {
   type SemanticGeneratedSegment,
 } from "../lib/ollama-semantic.ts";
 import { KERNELZERO_CLOSING_LINES } from "../lib/kernelzero-transcript-prompt.ts";
+import { podcastStyleFailureMessage } from "../lib/podcast-style.ts";
 
 function ndjson(content: unknown): Response {
   return new Response(
@@ -196,6 +197,60 @@ test("semantic finalization trims an incomplete tail to the last complete senten
   assert.doesNotMatch(finalized[0].script, /trailing fragment/i);
   assert.ok(finalized[0].script.startsWith("Welcome to KernelZero."));
   assert.ok(finalized[0].script.endsWith(KERNELZERO_CLOSING_LINES.at(-1)!));
+});
+
+test("semantic finalization restores a valid opening boundary without rewriting prose", () => {
+  const orientation =
+    "This episode examines semantic cache policy, so you'll understand how memory pressure changes recovery behavior and why that matters.";
+  const hook =
+    "The first result shows eviction errors rose by 37 percent after traffic settled.";
+  const body = "The source then separates memory cost from request latency.";
+  const finalized = finalizeSemanticSegments([segment(
+    "segment-1",
+    `${orientation} ${hook}\n\n${body}`,
+  )]);
+
+  assert.ok(
+    finalized[0].script.startsWith(
+      `Welcome to KernelZero. ${orientation}\n\n${hook}\n\n${body}`,
+    ),
+  );
+  assert.equal(podcastStyleFailureMessage(finalized[0].script), null);
+});
+
+test("semantic finalization preserves an already-valid two-sentence opening paragraph", () => {
+  const orientation =
+    "This episode examines semantic cache policy, so you'll understand how memory pressure changes recovery behavior and why that matters.";
+  const secondOrientationSentence =
+    "We'll also trace what operators can learn from that pressure before it becomes an outage.";
+  const opening =
+    `Welcome to KernelZero. ${orientation} ${secondOrientationSentence}`;
+  const body = "The source begins by separating memory cost from request latency.";
+  const finalized = finalizeSemanticSegments([segment(
+    "segment-1",
+    `${opening}\n\n${body}`,
+  )]);
+
+  assert.equal(
+    finalized[0].script,
+    `${opening}\n\n${body}\n\n${KERNELZERO_CLOSING_LINES.join("\n\n")}`,
+  );
+  assert.equal(podcastStyleFailureMessage(finalized[0].script), null);
+});
+
+test("semantic finalization leaves an invalid opening for the strict style gate", () => {
+  const invalidOpening =
+    "Cache policy internals. The eviction counter rises after traffic settles.";
+  const finalized = finalizeSemanticSegments([segment(
+    "segment-1",
+    `${invalidOpening}\n\nThe source separates memory cost from request latency.`,
+  )]);
+
+  assert.match(
+    podcastStyleFailureMessage(finalized[0].script) ?? "",
+    /Podcast style validation failed/,
+  );
+  assert.ok(finalized[0].script.includes(invalidOpening));
 });
 
 test("block compaction preserves exact first, middle, and last source offsets", () => {
@@ -612,6 +667,46 @@ test("semantic planning retries one invalid plan then uses the deterministic fal
   } finally {
     globalThis.fetch = originalFetch;
     process.env.OLLAMA_PIPELINE_LOG_LEVEL = originalLogLevel;
+  }
+});
+
+test("semantic planning uses the deterministic fallback when the model times out", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalLogLevel = process.env.OLLAMA_PIPELINE_LOG_LEVEL;
+  const originalTimeout = process.env.OLLAMA_SCRIPT_TIMEOUT_MS;
+  process.env.OLLAMA_PIPELINE_LOG_LEVEL = "off";
+  process.env.OLLAMA_SCRIPT_TIMEOUT_MS = "10";
+  let requests = 0;
+  globalThis.fetch = (async (_input, init) => {
+    requests += 1;
+    return await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => reject(new DOMException("Aborted", "AbortError")),
+        { once: true },
+      );
+    });
+  }) as typeof fetch;
+  try {
+    const plan = await createSemanticChunkPlan(
+      corpus(),
+      "daily_digest",
+      "standard",
+    );
+    assert.equal(requests, 1);
+    assert.equal(plan.segments.length, 5);
+    assert.deepEqual(
+      validateSemanticChunkPlan(plan, corpus(), "standard"),
+      [],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.env.OLLAMA_PIPELINE_LOG_LEVEL = originalLogLevel;
+    if (originalTimeout === undefined) {
+      delete process.env.OLLAMA_SCRIPT_TIMEOUT_MS;
+    } else {
+      process.env.OLLAMA_SCRIPT_TIMEOUT_MS = originalTimeout;
+    }
   }
 });
 
