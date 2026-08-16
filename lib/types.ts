@@ -179,6 +179,8 @@ export type EpisodeAudioVariant = {
   updatedAt: string;
 };
 
+export type EpisodeTitleProvenance = "provisional" | "gemini" | "manual";
+
 export type Episode = {
   id: string;
   contentItemId?: string;
@@ -190,6 +192,8 @@ export type Episode = {
   transcript: string;
   linkedInPost?: string | null;
   generationWarning?: EpisodeGenerationWarning | null;
+  /** Tracks whether the checkpoint title still needs its post-audio Gemini pass. */
+  titleProvenance?: EpisodeTitleProvenance;
   citations: Citation[];
   chapters: Chapter[];
   audioUrl: string | null;

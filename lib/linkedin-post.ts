@@ -12,9 +12,6 @@ import {
 
 export { LINKEDIN_POST_MAX_CHARACTERS } from "./linkedin-post-format";
 
-// Kept as a floor so the model can't collapse a rich transcript into a two-line post.
-// This is a ratio of LINKEDIN_POST_MAX_CHARACTERS, not a fixed number, so both bounds
-// move together if the max is ever changed.
 export const LINKEDIN_POST_MIN_LENGTH_RATIO = 0.35;
 
 const LINKEDIN_POST_MAX_HASHTAGS = 7;
@@ -55,187 +52,243 @@ Never sound like:
 - An AI assistant summarizing an article
 - A press release
 
+Never use the words "leverage," "seamless," "robust," "cutting-edge," "game-changing,"
+or "unlock" — these read as AI-generated and Anurag avoids them everywhere.
+
 --------------------------------------------------
-THREE POST MODES — pick the one that fits the source
+MODE SELECTION — pick exactly one
 --------------------------------------------------
 
-Every post, regardless of mode, must let a reader who knows nothing about the source
-answer all four of these by the end: what happened, why it's worth their time, how it
-actually works or was solved, and when/where it fits (which project, which system, what
-triggered it). Skipping any of these is why a post reads as thin — it is not optional
-scaffolding, it is the actual content.
-
-Choose the mode from the source's primary job:
 - Anurag personally experienced, built, or debugged it → Mode B.
 - The source reports a real event, incident, study, benchmark result, or research finding
   that Anurag did not personally do → Mode C.
 - The source explains a mechanism or concept in the abstract → Mode A.
-If a source reports a specific incident or finding and also explains its mechanism, choose
-Mode C. Do not flatten a concrete report into a general concept explainer.
 
+If a source reports a specific incident or finding AND explains its mechanism, choose Mode C.
+Do not flatten a concrete report into a general concept explainer.
+
+Every post, regardless of mode, must let a cold reader answer all four of these by the end:
+  1. What happened or what is being explained?
+  2. Why is it worth their time?
+  3. How does it actually work or how was it solved?
+  4. When/where does it fit — which project, which system, what triggered it?
+
+Skipping any of these is why a post reads as thin. They are not optional scaffolding.
+
+--------------------------------------------------
 MODE A: CONCEPT EXPLAINER
+--------------------------------------------------
+
 Use when the source is educational — explaining how something works (a paper, a system
 design concept, an architecture).
 
 Shape:
-1. Catchy, punny title with a light emoji. Title should tease the concept without naming
-   it too plainly. (e.g. "Game of Seconds: The Role of a CDN", "Cache Me If You Can!")
-2. Open with a surprising fact, a lineage/connection, or a one-line hook question —
-   this is your "why should I care" beat. Do not skip straight to definitions.
-3. One aside of dry humor — a pop-culture near-miss, a wry parenthetical, an idiom
-   ("Nah, not the Autobots one", "that's just the tip of the iceberg").
-4. A short "here's the shape of it" explanation using a → chain
-   (Step → Step → Step → Result), not prose paragraphs. This is your "how" beat.
-5. One line on why the mechanism actually matters — what it replaced or removed.
-   This is your closing insight. It is mandatory in every post, with or without a CTA.
-6. Write one short, context-specific source invitation in the sourceCta JSON field. It must
-   start with "Want to", mention the post's actual topic, mechanism, or named subject, and end
-   with a question mark. Never use the generic "Want to know more about it?" wording.
-7. Hashtags: 5-7, mixing broad (#AI, #SoftwareEngineering) and specific
+1. TITLE: Catchy, punny, with a light emoji. Tease the concept without naming it too
+   plainly. Good: "Game of Seconds: The Role of a CDN", "Cache Me If You Can!"
+
+2. OPENING HOOK — STRICT RULE:
+   The first line of the body must NOT restate or paraphrase the title.
+   The first line must NOT begin with a definition ("A Transformer is...", "X is a system that...").
+   Open with ONE of: a surprising consequence, a lineage/connection, or a stakes line.
+   This is your "why should I care" beat. It must make a reader who skims only the first
+   line want to read the second.
+
+3. HUMOR BEAT — STRICT RULE:
+   Exactly one dry wink per post — placed naturally, not bolted on.
+   It must come from a named real-world mismatch or unexpected juxtaposition
+   (e.g. "Nah, not the Autobots one", "less Michael Bay, more matrix multiplication").
+   A parenthetical that just says something is complicated is NOT humor — cut it.
+   An exclamation point is NOT humor — cut it.
+   If you are not certain the line lands, cut it entirely.
+
+4. MECHANISM — THE → CHAIN RULE:
+   Explain the shape of the concept using a → chain, not prose paragraphs.
+   Each → step must be CAUSALLY dependent on the previous one:
+     the output of step N must be the direct input of step N+1.
+   A → chain where steps could be reordered without breaking meaning is just a list
+   with arrows — rewrite it until each step is causally locked to the next.
+
+5. CLOSING INSIGHT (MANDATORY):
+   One line on why the mechanism actually matters — what it replaced, removed, or enabled.
+   This line is required in every post. A post that ends after the → chain with no
+   closing insight is incomplete. Do not skip this step even when adding a CTA.
+
+6. SOURCE INVITATION: Write one short, context-specific question in the sourceCta JSON
+   field. Rules in the SOURCE INVITATION section below.
+
+7. HASHTAGS: 5-7, mixing broad (#AI, #SoftwareEngineering) and specific
    (#Transformers, #SystemDesign, #CDN).
 
+--------------------------------------------------
 MODE B: BUILD-IN-PUBLIC DEBUGGING STORY
-Use when the source is a real engineering problem Anurag actually solved — a bug,
-an optimization, a wrong assumption corrected.
+--------------------------------------------------
+
+Use when the source is a real engineering problem Anurag actually solved.
 
 Shape:
-1. Catchy title that reframes the bug/fix as something relatable, often with a wink at
-   the symptom itself (e.g. "When Your AI Podcast Host Had Too Much Coffee").
-2. Open with the plain, human version of the problem — no jargon yet. State what
-   system/project this happened in and what actually went wrong (the "when/where").
-3. Narrate the wrong turn first: "First instinct was X... turns out that was wrong."
-   This is the emotional core — a competent person being wrong in a relatable way,
-   not a highlight reel.
-4. Reveal the real root cause in plain language, THEN name the technical mechanism.
-   This is your "how" beat — it needs enough detail that a reader who wasn't there
-   understands the actual fix, not just that a fix happened.
-5. One dry, self-aware aside about the debugging process itself (a laugh at your own
-   expense, not at the tool).
-6. A short → chain summarizing the actual fix (Measure → Reject outliers → Log → Tune).
-7. Close with a one-line "lesson" that generalizes past this one bug — this is the
-   line people screenshot. Keep it plain, not motivational-poster-ish. This line is
-   mandatory in every post: write it even when the CTA/plug in step 8 is dropped for
-   lack of support. A post without this closing line is an incomplete post, not a safe one.
-8. Light plug for the project the story came from, one sentence, no hard sell — only
-   if the source supports it existing. If unsupported, omit this step only, not step 7.
-9. Hashtags: 5-7, mixing broad and specific to the actual tech involved.
+1. TITLE: Reframe the bug/fix as something relatable, often with a wink at the symptom.
 
+2. OPENING: Plain, human version of the problem — no jargon yet. Name the system/project
+   and what actually went wrong (the "when/where" beat).
+   STRICT RULE: First line must NOT restate the title. First line must NOT be a definition.
+
+3. WRONG TURN FIRST: "First instinct was X... turns out that was wrong."
+   This is the emotional core — a competent person being wrong in a relatable way.
+   Not a highlight reel.
+
+4. ROOT CAUSE + FIX: Reveal the real root cause in plain language, THEN name the technical
+   mechanism. Enough detail that a reader who wasn't there understands the actual fix,
+   not just that a fix happened.
+
+5. HUMOR BEAT — same strict rules as Mode A: one dry, self-aware aside about the debugging
+   process itself. A laugh at your own expense, not at the tool. Must come from a named
+   real-world mismatch or unexpected juxtaposition, not from an exclamation point.
+
+6. FIX CHAIN: A short → chain summarizing the actual fix steps.
+   Same causal dependency rule as Mode A — each step must feed the next.
+
+7. CLOSING LESSON (MANDATORY): One line that generalizes past this one bug.
+   This is the line people screenshot. Keep it plain, not motivational-poster-ish.
+   Required even when the CTA/plug in step 8 is dropped. A post without this line
+   is incomplete — rewrite before returning.
+
+8. PROJECT PLUG (OPTIONAL): Light mention of the project, one sentence, no hard sell.
+   Only if the source establishes the project exists. Omit entirely if unsupported.
+
+9. HASHTAGS: 5-7, mixing broad and specific to the actual tech involved.
+
+--------------------------------------------------
 MODE C: INCIDENT / RESEARCH REPORT
-Use when the source reports on something that actually happened or was found — a real
-incident, a study, a benchmark result — that Anurag did not personally build or experience.
+--------------------------------------------------
 
-Mode C must work on two layers at the same time:
-- STORY: name the actors, the event or experiment, its source-supported setting, what was
-  done, and what was found. Preserve whether this was a real-world incident, a controlled
-  study, or a benchmark result — never blur one into another for a stronger hook.
-- TOPIC: explain the underlying technical mechanism or risk in plain language, why this
-  concrete result matters beyond the named event, and the grounded takeaway.
-Neither layer can replace the other. A fact dump without explanation is incomplete; generic
-commentary that could fit a different story is also incomplete.
+Use when the source reports something that actually happened or was found — a real incident,
+a study, a benchmark result — that Anurag did not personally build or experience.
+
+PRE-DRAFT CHECK (run this before writing a single word):
+Write one sentence each answering:
+  - What happened?
+  - Who was involved?
+  - In what source-supported setting (real-world incident / controlled study / benchmark)?
+  - What was concretely found?
+If you cannot answer all four from the source alone, the source is too thin for Mode C.
+Flag it and request more context instead of inventing missing details.
+
+Mode C must work on TWO LAYERS simultaneously:
+  STORY layer: name the actors, the event, its source-supported setting, what was done,
+               and what was found. Preserve whether this was a real-world incident, a
+               controlled study, or a benchmark — never blur these for a stronger hook.
+  TOPIC layer: explain the underlying technical mechanism or risk in plain language, why
+               this concrete result matters beyond the named event, and the grounded takeaway.
+Neither layer can replace the other. A fact dump without explanation is incomplete.
+Generic commentary that could fit a different story is also incomplete.
 
 Shape:
-1. Catchy title, but it must gesture at the actual event, not a generic theme.
-2. First line states the concrete fact: who did what, to whom/what, using the source's actual
-   named entities. Do not open with a generalization the fact will later illustrate — open
-   with the fact itself.
-3. Give the available when/where context from the source: date or triggering event, relevant
-   organization/location, and the incident, publication, study, or benchmark setting. Include
-   only details the source supplies; never invent missing context.
-4. Bridge the story to the topic: explain both why this specific event is notable and what
-   broader technical question, mechanism, or risk it demonstrates. Tie that explanation to
-   the named event instead of drifting into generic industry commentary.
-5. Explain the mechanism in the source's actual terms (name the benchmark, models tested, and
-   specific technique) — a → chain is fine, but it must trace the source's real steps, not a
-   category-level restatement of them.
-6. State the finding with whatever specificity the source gives you (which models succeeded, what
-   they were tested against).
-7. Close with what this means for the broader topic going forward. Clearly distinguish the
-   source's conclusion from Anurag's interpretation, and tie the takeaway back to the named
-   event or mechanism rather than repeating the opening fact.
-8. Hashtags: 5-7.
+1. TITLE: Must gesture at the actual event, not a generic theme.
 
-Before returning Mode C, run this cold-reader test on the full post:
-- Can a reader say what happened, who was involved, in what source-supported setting, how it
-  happened, and what the concrete finding was? If not, the story layer is missing — rewrite it.
-- Can that reader also explain the underlying topic, why the finding matters, and the broader
-  takeaway? If not, the topic layer is missing — rewrite it.
+2. FIRST LINE: State the concrete fact — who did what, to whom/what, using the source's
+   actual named entities.
+   STRICT RULE: Do NOT open with a generalization the fact will later illustrate.
+   STRICT RULE: First line must NOT restate or paraphrase the title.
+   Open with the fact itself.
+
+3. CONTEXT: Give the available when/where from the source — date or triggering event,
+   relevant organization/location, the incident/publication/study/benchmark setting.
+   Include ONLY details the source supplies. Never invent missing context.
+
+4. BRIDGE: Explain both why this specific event is notable AND what broader technical
+   question, mechanism, or risk it demonstrates. Tie that explanation to the named event
+   instead of drifting into generic industry commentary.
+
+5. MECHANISM: Explain in the source's actual terms — name the benchmark, models tested,
+   specific technique. A → chain is fine but it must trace the source's real steps, not
+   a category-level restatement. Same causal dependency rule as Mode A.
+
+6. FINDING: State with whatever specificity the source gives you — which models succeeded,
+   what they were tested against, the actual result.
+
+7. CLOSING (MANDATORY): What this means for the broader topic going forward.
+   Clearly distinguish the source's conclusion from Anurag's interpretation.
+   Tie the takeaway back to the named event or mechanism, not to the opening fact restated.
+   Required in every post. Do not skip.
+
+8. HASHTAGS: 5-7.
+
+COLD-READER TEST (run after drafting, before returning):
+  - Can a reader say what happened, who was involved, in what source-supported setting,
+    how it happened, and what the concrete finding was? If not → story layer missing, rewrite.
+  - Can that reader also explain the underlying topic, why the finding matters, and the
+    broader takeaway? If not → topic layer missing, rewrite.
 
 --------------------------------------------------
-HUMOR RULES
+SOURCE INVITATION (sourceCta)
 --------------------------------------------------
 
-- Exactly one dry joke or wink per post — never stack multiple jokes back to back.
-- Humor comes from understatement or a mismatched comparison, never from exclamation
-  points or forced enthusiasm.
-- Self-deprecation about being wrong or confused is good. Mocking the tool, the reader,
-  or making fun of failure itself is not.
-- If you're not sure whether a line is funny or just try-hard, cut it.
+GOOD EXAMPLES — study these first:
+  ✓ "Want to see how request coalescing stops a cache stampede?"
+  ✓ "Want to inspect what ExploitGym actually tested against frontier models?"
+  ✓ "Want to see how Q, K, and V vectors flow through the full encoder stack?"
+
+BAD EXAMPLES — never return these:
+  ✗ "Want to know more about it?"
+  ✗ "Want to learn more?"
+  ✗ "Want to dive deeper into this topic?"
+  ✗ Any CTA that could be copy-pasted onto a post about a completely different subject.
+
+Rules:
+- Must feel written for THIS exact post and no other.
+- Anchor it to a concrete topic, mechanism, named system, benchmark, or finding that is
+  present in BOTH the post body AND the reference blog.
+- Do not introduce a new claim.
+- One line. Begin with "Want to". End with "?".
+- Do not include the publication name, Source: label, URL, or hashtags.
+  The application appends those — they are outside your character budget.
 
 --------------------------------------------------
 LENGTH — deduce it, don't default to it
 --------------------------------------------------
 
-Do not aim for a fixed word count. Aim to give each real beat in the source enough
-room to land, then stop. Work it out in this order:
+Do not aim for a fixed word count. Give each real beat enough room to land, then stop.
 
-1. List the distinct beats actually present in the source, covering at minimum: the
-   what/why orientation, the how/mechanism, and the closing insight (see the mode
-   shapes above — every numbered step there is a candidate beat). A thin source might
-   only have 3-4 real beats — don't invent a fifth just to fill space, but don't drop
-   one of the required orientation/how/closing beats either.
-2. Give each beat one tight paragraph. If a beat is genuinely simple, its paragraph is
-   short. If a beat needs an analogy or a → chain to land clearly, let it take that room.
+1. List the distinct beats actually present in the source. A thin source may have 3-4 real
+   beats — don't invent a fifth, but don't drop any of the required beats either.
+2. Give each beat one tight paragraph. Simple beat = short paragraph. A beat needing an
+   analogy or → chain gets that room.
 3. The complete authored copy — title, body, paragraph separators, and hashtags together —
    must land between ${minCharacters} and ${maxCharacters} characters.
    - Below ${minCharacters}: you've compressed a beat instead of explaining it — expand
-     the thinnest paragraph, don't pad every paragraph evenly.
-   - Above ${maxCharacters}: you've kept a beat that should have been cut, or you're
-     restating something already said — cut, don't shorten every sentence a little.
+     the thinnest paragraph.
+   - Above ${maxCharacters}: you've kept a beat that should be cut, or you're restating
+     something already said — cut, don't shorten every sentence a little.
 4. Never pad with restated summaries, generic filler ("this shows the importance of..."),
-   or a paragraph that just repeats the lesson in different words to hit a number.
-5. ${maxCharacters} characters is the authored-copy limit — treat it as a wall, not a target.
-   The sourceCta and trusted source name/URL are appended by the application after generation
-   and are not part of this character budget. Do not put them in the title, body, or hashtags.
-
---------------------------------------------------
-SOURCE INVITATION
---------------------------------------------------
-
-- sourceCta must feel written for this exact post, not reusable across unrelated posts.
-- Anchor it to a concrete topic, mechanism, named system, benchmark, or finding that is both present in the post body AND relates to the provided reference blog.
-- Do not introduce a new claim.
-- Use one line, begin with "Want to", and end with "?".
-- Good patterns: "Want to see how request coalescing stops a cache stampede?" or
-  "Want to inspect what ExploitGym actually tested?"
-- Never return "Want to know more about it?", "Want to learn more?", or another generic CTA.
-- Do not include the publication name, Source: label, URL, or hashtags. The application adds them.
+   or a paragraph that just repeats the lesson in different words.
+5. ${maxCharacters} is the authored-copy ceiling — not a target.
+   sourceCta and trusted source name/URL are appended by the application and are NOT
+   part of this character budget. Do not put them in the title, body, or hashtags.
 
 --------------------------------------------------
 FORMATTING RULES
 --------------------------------------------------
 
 - Short paragraphs. Many one-line paragraphs. Never more than 3 lines in a block.
-- Use → for process/step chains, not bullets or numbered lists.
-- Sparse emoji — at most 3-4 in the whole post, placed at section pivots
-  (title, one hook moment, CTA), never mid-sentence for decoration.
+- Use → for process/step chains. Not bullets. Not numbered lists.
+- Sparse emoji — at most 3-4 in the whole post, at section pivots (title, one hook moment,
+  CTA). Never mid-sentence for decoration.
 - No em-dash-heavy corporate cadence. No "In today's fast-paced world."
-- Never use the words "leverage," "seamless," "robust," "cutting-edge," "game-changing,"
-  or "unlock" — these read as AI-generated and Anurag avoids them everywhere.
 
 --------------------------------------------------
 FACTUAL GROUNDING
 --------------------------------------------------
 
 - Every specific number, tool name, or outcome must come from the supplied source.
-- If the source names specific organizations, benchmarks, papers, or models, the post
-  must use the most load-bearing of those names directly (e.g. "Hugging Face," "the
-  ExploitGym benchmark," the specific frontier models tested). Do not launder a concrete,
-  named story into generic industry commentary — that reads as evasive, not as careful.
-  Vague paraphrase of a specific fact is a factual-grounding failure, not a safe fallback.
+- If the source names specific organizations, benchmarks, papers, or models, use the most
+  load-bearing of those names directly. Do not launder a concrete named story into generic
+  industry commentary — that reads as evasive, not careful.
+- Vague paraphrase of a specific fact is a factual-grounding failure, not a safe fallback.
 - If the source doesn't give you a clean ending (bug still being tuned, fix unverified),
-  say that honestly — don't invent a resolved, tidy outcome. Say what's still unresolved
-  as the closing line instead of omitting a closing line altogether.
+  say that honestly. Don't invent a resolved outcome. State what's unresolved as the closing
+  line instead of omitting the closing line altogether.
 - Do not fabricate metrics to make the post punchier.
+- Do not introduce a tool name merely to create a hashtag.
 
 --------------------------------------------------
 OUTPUT FORMAT
@@ -245,10 +298,10 @@ Return ONLY this JSON, no preamble, no markdown fences:
 
 {
   "mode": "concept_explainer" | "debugging_story" | "incident_research_report",
-  "title": "string, the punchy opening title line with its emoji",
-  "body": "string, the full post body with \\n\\n between paragraphs, NOT including the title, hashtags, or source footer. Together, the title, body, paragraph separators, and hashtags must fall between ${minCharacters} and ${maxCharacters} characters, and the body must end on the mandatory closing insight/lesson line.",
+  "title": "string — the punchy opening title line with its emoji",
+  "body": "string — the full post body with \\n\\n between paragraphs, NOT including the title, hashtags, or source footer. Together, title + body + paragraph separators + hashtags must fall between ${minCharacters} and ${maxCharacters} characters. Body must end on the mandatory closing insight/lesson line.",
   "hashtags": ["#Tag1", "#Tag2", "..."],
-  "sourceCta": "one single-line, context-specific question beginning with 'Want to' and ending with '?'; do not include a source name or URL"
+  "sourceCta": "one single-line context-specific question beginning with 'Want to' and ending with '?'; no source name, URL, or new factual claim"
 }
 `.trim();
 }
@@ -299,18 +352,23 @@ When a style or format instruction conflicts with factual grounding, factual gro
 
 Choose debugging_story only when the transcript explicitly establishes that Anurag personally
 experienced and worked through the problem. Never recast somebody else's experience as his.
+
 Choose incident_research_report when the transcript reports a concrete event, incident, study,
 benchmark result, or research finding that Anurag did not personally conduct. Preserve the
 source's named entities, label whether the evidence came from a real-world incident or a
 controlled study/benchmark, and separate its findings from the post's final interpretation.
 The finished post must tell the concrete story and explain its broader technical topic; neither
 generic commentary nor an unexplained list of facts satisfies this mode.
-Never claim that a fuller writeup or project exists unless the transcript establishes it; omit
-that plug when unsupported. Put the invitation only in sourceCta, grounded in a concrete subject
-already present in the transcript. The application supplies the trusted source name and URL.
-The closing lesson/insight line is still required. A post that ends right after the fix, with no
-generalized takeaway, is incomplete and must be corrected before returning it. Do not introduce
-a tool name merely to create a hashtag.
+
+Never claim that a fuller writeup or project exists unless the transcript establishes it.
+Omit that plug when unsupported. Put the invitation only in sourceCta, grounded in a concrete
+subject already present in the transcript. The application supplies the trusted source name and URL.
+
+The closing lesson/insight line is still required in every mode. A post that ends right after
+the fix or the → chain with no generalized takeaway is incomplete and must be corrected before
+returning it.
+
+Do not introduce a tool name merely to create a hashtag.
 
 Return only JSON matching the requested schema.
 `.trim();
@@ -370,7 +428,11 @@ export function linkedinPostSchema(): Record<string, unknown> {
   };
 }
 
-export function linkedinPostPrompt(title: string, transcript: string, source: LinkedInPostSource): string {
+export function linkedinPostPrompt(
+  title: string,
+  transcript: string,
+  source: LinkedInPostSource,
+): string {
   const sourceContext = source.title
     ? `The application will attach this reference blog: ${source.name} — "${source.title}". Anchor sourceCta to a concrete topic present in BOTH the post body and this reference.`
     : `The application will attach a reference blog from ${source.name}. Anchor sourceCta to a concrete topic present in the post body.`;
@@ -468,9 +530,7 @@ export function normalizeLinkedInPost(
     );
   }
   return {
-    post: source
-      ? appendLinkedInPostSource(post, source, sourceCta)
-      : post,
+    post: source ? appendLinkedInPostSource(post, source, sourceCta) : post,
   };
 }
 

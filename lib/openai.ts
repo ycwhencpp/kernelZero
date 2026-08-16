@@ -1,7 +1,10 @@
 import {
   aiProviderLabel,
+  configuredEpisodeTitleProviderMode,
   estimatedAudioCostUsd,
+  estimatedEpisodeTitleCostUsd,
   estimatedGenerationCostUsd,
+  resolveEpisodeTitleProvider,
   resolveAiProvider,
 } from "./ai-config";
 import { encodedAudioDurationSeconds } from "./audio-duration";
@@ -651,6 +654,9 @@ export async function generatePodcast(
     showNotes: generated.showNotes,
     transcript: generated.script,
     generationWarning,
+    ...(configuredEpisodeTitleProviderMode()
+      ? { titleProvenance: "provisional" as const }
+      : {}),
     citations,
     chapters,
     audioUrl: null,
@@ -755,6 +761,8 @@ export async function synthesizePodcastAudio(
 export {
   aiProviderLabel,
   estimatedAudioCostUsd,
+  estimatedEpisodeTitleCostUsd,
   estimatedGenerationCostUsd,
+  resolveEpisodeTitleProvider,
   resolveAiProvider,
 };

@@ -4,7 +4,7 @@ import { normalizeEpisodeLength } from "./podcast-length";
 import { normalizeEvidenceConfidence } from "./podcast-schema";
 import { loadAllPaginatedRows } from "./supabase-pagination";
 import { getSupabase, MEDIA_BUCKET } from "./supabase";
-import type { Collection, ContentItem, DashboardState, Episode, EpisodeAudioVariant, EpisodeGenerationWarning, EvidenceClaim, InterestProfile, JobRun, Source, VoiceProfile, WorkspaceSettings } from "./types";
+import type { Collection, ContentItem, DashboardState, Episode, EpisodeAudioVariant, EpisodeGenerationWarning, EpisodeTitleProvenance, EvidenceClaim, InterestProfile, JobRun, Source, VoiceProfile, WorkspaceSettings } from "./types";
 
 // Supabase rows are intentionally schema-flexible at this server boundary.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -35,6 +35,14 @@ const GENERATION_WARNINGS: readonly EpisodeGenerationWarning[] = [
 ];
 function generationWarning(value: unknown): EpisodeGenerationWarning | null {
   return GENERATION_WARNINGS.find((warning) => warning === value) ?? null;
+}
+const TITLE_PROVENANCE: readonly EpisodeTitleProvenance[] = [
+  "provisional",
+  "gemini",
+  "manual",
+];
+function episodeTitleProvenance(value: unknown): EpisodeTitleProvenance | null {
+  return TITLE_PROVENANCE.find((provenance) => provenance === value) ?? null;
 }
 const iso = (value: unknown) => value ? new Date(String(value)).toISOString() : null;
 const array = <T>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
@@ -110,6 +118,7 @@ function mapEpisode(row: Row, variantRows: Row[] = []): Episode {
     null;
   const audioKey = defaultVariant?.audioKey ?? storedAudioKey;
   const rowChapters = array<Episode["chapters"][number]>(row.chapters_json);
+  const titleProvenance = episodeTitleProvenance(row.title_provenance);
   return {
     id: row.id,
     contentItemId: row.content_item_id ?? undefined,
@@ -121,6 +130,7 @@ function mapEpisode(row: Row, variantRows: Row[] = []): Episode {
     transcript: row.transcript,
     linkedInPost: typeof row.linkedin_post === "string" ? row.linkedin_post : null,
     generationWarning: generationWarning(row.generation_warning),
+    ...(titleProvenance ? { titleProvenance } : {}),
     citations: array(row.citations_json),
     chapters: defaultVariant?.chapters ?? rowChapters,
     audioUrl: defaultVariant?.audioUrl ?? (audioKey ? mediaUrl(audioKey) : row.audio_url),
@@ -147,6 +157,9 @@ export function storedDurationSeconds(value: number): number {
 }
 function episodeRow(ownerId: string, value: Episode): Row {
   const row: Row = { id: value.id, owner_id: ownerId, content_item_id: value.contentItemId ?? null, type: value.type, title: value.title, dek: value.dek, script: value.script, show_notes: value.showNotes, transcript: value.transcript, linkedin_post: value.linkedInPost ?? null, generation_warning: value.generationWarning ?? null, citations_json: value.citations, citation_count: value.citations.length, chapters_json: value.chapters, audio_url: value.audioUrl, audio_key: value.audioKey ?? null, audio_bytes: value.audioBytes ?? null, duration_seconds: storedDurationSeconds(value.durationSeconds), status: value.status, published_at: value.publishedAt, immutable_guid: value.immutableGuid, generation: value.generation, created_at: value.createdAt, updated_at: new Date().toISOString() };
+  if (value.titleProvenance !== undefined) {
+    row.title_provenance = value.titleProvenance;
+  }
   if (value.defaultAudioVariantId !== undefined) {
     row.default_audio_variant_id = value.defaultAudioVariantId;
   }
@@ -974,6 +987,7 @@ export async function updateEpisode(
     | "linkedInPost"
     | "chapters"
     | "generationWarning"
+    | "titleProvenance"
   >,
 ) {
   const db = await requireDb();
@@ -987,9 +1001,112 @@ export async function updateEpisode(
   if (typeof patch.linkedInPost === "string" || patch.linkedInPost === null) updates.linkedin_post = patch.linkedInPost;
   if (patch.chapters !== undefined) updates.chapters_json = patch.chapters;
   if (patch.generationWarning !== undefined) updates.generation_warning = patch.generationWarning;
+  if (patch.titleProvenance !== undefined) updates.title_provenance = patch.titleProvenance;
   const { error } = await db.from("episodes").update(updates).eq("id", episodeId).eq("owner_id", ownerId);
   if (error) throw new Error(error.message);
 }
+
+export async function updateGeneratedEpisodeTitle(
+  ownerId: string,
+  episodeId: string,
+  expected: Pick<Episode, "title" | "script">,
+  next: Pick<Episode, "title" | "generationWarning">,
+): Promise<boolean> {
+  const db = await requireDb();
+  if (!db) return true;
+
+  const { data: current, error: readError } = await db
+    .from("episodes")
+    .select("title, script, title_provenance, updated_at")
+    .eq("id", episodeId)
+    .eq("owner_id", ownerId)
+    .maybeSingle();
+  if (readError) throw new Error(readError.message);
+  if (!current) throw new EpisodeNotFoundError();
+  if (
+    current.title !== expected.title ||
+    current.script !== expected.script ||
+    episodeTitleProvenance(current.title_provenance) !== "provisional"
+  ) {
+    return false;
+  }
+
+  let update = db
+    .from("episodes")
+    .update({
+      title: next.title,
+      generation_warning: next.generationWarning ?? null,
+      title_provenance: "gemini",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", episodeId)
+    .eq("owner_id", ownerId)
+    .eq("title_provenance", "provisional");
+  if (typeof current.updated_at === "string" && current.updated_at) {
+    update = update.eq("updated_at", current.updated_at);
+  }
+  const { data: updated, error: updateError } = await update
+    .select("id")
+    .maybeSingle();
+  if (updateError) throw new Error(updateError.message);
+  return Boolean(updated);
+}
+
+/**
+ * Applies an editor-requested Gemini title only while the title and transcript
+ * used for generation are still current. Unlike the automatic finalizer, this
+ * deliberately accepts manual, provisional, and previously generated titles.
+ */
+export async function updateRegeneratedEpisodeTitle(
+  ownerId: string,
+  episodeId: string,
+  expected: { title: string; transcript: string },
+  next: Pick<Episode, "title" | "generationWarning">,
+): Promise<boolean> {
+  const db = await requireDb();
+  if (!db) return true;
+
+  const { data: current, error: readError } = await db
+    .from("episodes")
+    .select("title, script, transcript, status, updated_at")
+    .eq("id", episodeId)
+    .eq("owner_id", ownerId)
+    .maybeSingle();
+  if (readError) throw new Error(readError.message);
+  if (!current) throw new EpisodeNotFoundError();
+
+  const currentTranscript =
+    (typeof current.transcript === "string" && current.transcript.trim()) ||
+    (typeof current.script === "string" ? current.script.trim() : "");
+  if (
+    (current.status !== "draft" && current.status !== "needs_approval") ||
+    current.title !== expected.title ||
+    currentTranscript !== expected.transcript.trim()
+  ) {
+    return false;
+  }
+
+  let update = db
+    .from("episodes")
+    .update({
+      title: next.title,
+      generation_warning: next.generationWarning ?? null,
+      title_provenance: "gemini",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", episodeId)
+    .eq("owner_id", ownerId)
+    .in("status", ["draft", "needs_approval"]);
+  if (typeof current.updated_at === "string" && current.updated_at) {
+    update = update.eq("updated_at", current.updated_at);
+  }
+  const { data: updated, error: updateError } = await update
+    .select("id")
+    .maybeSingle();
+  if (updateError) throw new Error(updateError.message);
+  return Boolean(updated);
+}
+
 export async function saveLinkedInPost(ownerId: string, episodeId: string, post: string): Promise<Episode> {
   const db = await requireDb();
   if (!db) throw new Error("Supabase is not configured. A LinkedIn post needs durable workspace storage.");

@@ -5,9 +5,11 @@ import {
 } from "../../../lib/domain";
 import {
   aiProviderLabel,
+  estimatedEpisodeTitleCostUsd,
   estimatedGenerationCostUsd,
   generatePodcast,
   resolveAiProvider,
+  resolveEpisodeTitleProvider,
 } from "../../../lib/openai";
 import {
   hasUsableAudioUrl,
@@ -23,6 +25,7 @@ import {
 } from "../../../lib/store";
 import { normalizeEpisodeLength } from "../../../lib/podcast-length";
 import { normalizePodcastFocus } from "../../../lib/podcast-focus";
+import { finalizeEpisodeTitleAfterNarration } from "../../../lib/podcast-title";
 import {
   episodeSourceItemIds,
   parsePodcastRegenerationContext,
@@ -141,10 +144,19 @@ export async function POST(request: Request) {
       );
     }
     const provider = resolveAiProvider();
-    const estimatedCostUsd = estimatedGenerationCostUsd(
-      provider,
-      body.includeAudio ?? true,
+    const needsAudio = body.includeAudio ?? true;
+    const configuredTitleProvider = needsAudio
+      ? resolveEpisodeTitleProvider()
+      : null;
+    const titleEstimatedCostUsd = estimatedEpisodeTitleCostUsd(
+      configuredTitleProvider,
     );
+    const estimatedCostUsd =
+      estimatedGenerationCostUsd(provider, needsAudio) +
+      titleEstimatedCostUsd;
+    const generationProviderLabel = configuredTitleProvider === "gemini"
+      ? `${aiProviderLabel(provider)} + Gemini title`
+      : aiProviderLabel(provider);
     if (
       !hasBudgetForGeneration(
         state.stats.dailySpendUsd,
@@ -242,7 +254,6 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    const needsAudio = body.includeAudio ?? true;
     const voiceProfile = needsAudio ? await getActiveVoiceProfile(ownerId) : null;
     if (needsAudio && process.env.REQUIRE_LOCAL_VOICE === "true" && !voiceProfile) {
       return Response.json(
@@ -261,7 +272,7 @@ export async function POST(request: Request) {
       id: jobId,
       stage: type === "daily_digest" ? "Daily digest" : "Deep-dive podcast",
       status: "running",
-      provider: aiProviderLabel(provider),
+      provider: generationProviderLabel,
     });
     const traceId = createPipelineTraceId("manual-podcast");
     const sourceCorpus = provider === "ollama"
@@ -288,7 +299,7 @@ export async function POST(request: Request) {
           stage: "Podcast narration",
           status: "failed",
           provider: aiProviderLabel(failedProvider),
-          costUsd: estimatedCostUsd,
+          costUsd: Math.max(0, estimatedCostUsd - titleEstimatedCostUsd),
           error: internalError,
         });
       } catch (jobError) {
@@ -413,6 +424,22 @@ export async function POST(request: Request) {
       }
     }
 
+    let titleProvider: "gemini" | null = null;
+    let titleError: string | null = null;
+    if (needsAudio && hasUsableAudioUrl(episode.audioUrl)) {
+      const finalizedTitle = await finalizeEpisodeTitleAfterNarration(
+        ownerId,
+        episode,
+        {
+          title: generated.episode.title,
+          script: generated.episode.script,
+        },
+      );
+      episode = finalizedTitle.episode;
+      titleProvider = finalizedTitle.titleProvider;
+      titleError = finalizedTitle.titleError;
+    }
+
     let refreshedState = state;
     let stateIsAuthoritative = false;
     try {
@@ -436,7 +463,9 @@ export async function POST(request: Request) {
     try {
       const completedAt = new Date().toISOString();
       const stage = type === "daily_digest" ? "Daily digest" : "Deep-dive podcast";
-      const providerLabel = aiProviderLabel(generated.provider);
+      const providerLabel = configuredTitleProvider === "gemini"
+        ? `${aiProviderLabel(generated.provider)} + Gemini title`
+        : aiProviderLabel(generated.provider);
       await recordJob(ownerId, {
         id: jobId,
         stage,
@@ -482,6 +511,8 @@ export async function POST(request: Request) {
     return Response.json({
       episode: storedEpisode,
       provider: generated.provider,
+      titleProvider,
+      titleError,
       state: responseState,
       sourceSelectionNotice,
     });

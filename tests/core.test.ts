@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   buildTechRadar,
@@ -71,6 +72,10 @@ import {
   linkedinPostPrompt,
   normalizeLinkedInPost,
 } from "../lib/linkedin-post.ts";
+import {
+  GEMINI_LINKEDIN_STYLE_PRECEDENCE,
+  LINKEDIN_POST_STYLE_GUIDE,
+} from "../lib/linkedin-post-style-guide.ts";
 import {
   linkedInPostEditorDraft,
   resolveLinkedInPostEditorValue,
@@ -1512,29 +1517,29 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
-    /First line states the concrete fact:[\s\S]*who did what[\s\S]*actual[\s\S]*named entities/,
+    /FIRST LINE:[\s\S]*State the concrete fact[\s\S]*who did what[\s\S]*actual named entities/i,
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
-    /Mode C must work on two layers at the same time:[\s\S]*STORY:[\s\S]*TOPIC:/,
+    /Mode C must work on TWO LAYERS simultaneously:[\s\S]*STORY layer:[\s\S]*TOPIC layer:/i,
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
-    /Preserve whether this was a real-world incident, a controlled[\s\S]*study, or a benchmark result/,
+    /Preserve whether this was a real-world incident,[\s\S]*controlled study, or a benchmark/,
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
-    /Give the available when\/where context from the source/,
+    /Give the available when\/where from the source/,
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
-    /why this specific event is notable[\s\S]*broader technical question, mechanism, or risk/,
+    /why this specific event is notable[\s\S]*broader technical[\s\S]*question, mechanism, or risk/,
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
     /Can a reader say what happened[\s\S]*Can that reader also explain the underlying topic/,
   );
-  assert.match(LINKEDIN_POST_PROMPT, /Exactly one dry joke or wink per post/);
+  assert.match(LINKEDIN_POST_PROMPT, /Exactly one dry wink per post/);
   assert.equal(LINKEDIN_POST_MIN_LENGTH_RATIO, 0.35);
   assert.match(
     LINKEDIN_POST_PROMPT,
@@ -1542,7 +1547,7 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
-    /what happened, why it's worth their time, how it[\s\S]*when\/where it fits/,
+    /what happened[\s\S]*why is it worth their time[\s\S]*how does it[\s\S]*when\/where does it fit/i,
   );
   assert.match(
     LINKEDIN_POST_PROMPT,
@@ -1563,7 +1568,7 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   );
   assert.match(
     LINKEDIN_POST_SYSTEM_PROMPT,
-    /must use the most load-bearing of those names directly/,
+    /use the most[\s\S]*load-bearing of those names directly/,
   );
   assert.match(
     LINKEDIN_POST_SYSTEM_PROMPT,
@@ -1575,7 +1580,28 @@ test("LinkedIn post system prompt uses Anurag's supplied voice and style anchors
   );
   assert.match(
     LINKEDIN_POST_SYSTEM_PROMPT,
-    /sourceCta[^]*actual topic, mechanism, or named subject/i,
+    /sourceCta[^]*(?:concrete topic|concrete subject|actual topic)/i,
+  );
+});
+
+test("Gemini bundles Anurag's complete LinkedIn style guide verbatim", () => {
+  assert.equal(
+    createHash("sha256").update(LINKEDIN_POST_STYLE_GUIDE).digest("hex"),
+    "3b508f2cbe6427e2bcb9cb13f8e94371291659fe0f336fc000e91ff42b8c6ca5",
+  );
+  assert.match(LINKEDIN_POST_STYLE_GUIDE, /Zero to one per post/);
+  assert.match(LINKEDIN_POST_STYLE_GUIDE, /1-2 max/);
+  assert.match(
+    LINKEDIN_POST_STYLE_GUIDE,
+    /Building a GenAI app eventually means building the same five things everyone else did/,
+  );
+  assert.match(
+    GEMINI_LINKEDIN_STYLE_PRECEDENCE,
+    /Match the target sample, never the avoid examples/,
+  );
+  assert.match(
+    GEMINI_LINKEDIN_STYLE_PRECEDENCE,
+    /transcript-only factual-grounding rules[^]*remain authoritative/,
   );
 });
 
@@ -2289,6 +2315,31 @@ test("LinkedIn provider override uses Gemini without changing the podcast provid
         .responseMimeType,
       "application/json",
     );
+    const systemInstruction = requestBody.systemInstruction as Record<
+      string,
+      unknown
+    >;
+    const systemParts = systemInstruction.parts as Array<
+      Record<string, unknown>
+    >;
+    assert.equal(systemParts[0].text, LINKEDIN_POST_STYLE_GUIDE);
+    assert.equal(systemParts[1].text, LINKEDIN_POST_SYSTEM_PROMPT);
+    assert.equal(systemParts[2].text, GEMINI_LINKEDIN_STYLE_PRECEDENCE);
+    assert.doesNotMatch(
+      systemParts.map((part) => String(part.text)).join("\n"),
+      /source-grounded fact for the LinkedIn post/,
+    );
+    const contents = requestBody.contents as Array<Record<string, unknown>>;
+    const userParts = contents[0].parts as Array<Record<string, unknown>>;
+    assert.match(
+      String(userParts[0].text),
+      /source-grounded fact for the LinkedIn post/,
+    );
+    const serializedRequest = JSON.stringify(requestBody);
+    assert.ok(
+      serializedRequest.indexOf("# LinkedIn Post Style Guide") <
+        serializedRequest.indexOf("source-grounded fact for the LinkedIn post"),
+    );
 
     delete process.env.GEMINI_API_KEY;
     assert.equal(resolveLinkedInPostProvider(), null);
@@ -2577,6 +2628,7 @@ test("episode creation and edits persist title warning metadata", async () => {
     showNotes: "Source notes.",
     transcript: "A broad survey that mentions Ollama only once.",
     generationWarning: "title_validation_failed",
+    titleProvenance: "provisional",
     citations: [],
     chapters: [{ title: "Opening", startSeconds: 0, scriptStart: 0 }],
     audioUrl: null,
@@ -2594,6 +2646,7 @@ test("episode creation and edits persist title warning metadata", async () => {
       title: "Agent infrastructure survey",
       dek: "An updated summary.",
       generationWarning: null,
+      titleProvenance: "manual",
     });
 
     const insertBody = Array.isArray(requests[0].body)
@@ -2601,6 +2654,7 @@ test("episode creation and edits persist title warning metadata", async () => {
       : requests[0].body;
     assert.equal(requests[0].method, "POST");
     assert.equal(insertBody.generation_warning, "title_validation_failed");
+    assert.equal(insertBody.title_provenance, "provisional");
     assert.deepEqual(insertBody.chapters_json, [
       { title: "Opening", startSeconds: 0, scriptStart: 0 },
     ]);
@@ -2609,6 +2663,7 @@ test("episode creation and edits persist title warning metadata", async () => {
       title: "Agent infrastructure survey",
       dek: "An updated summary.",
       generation_warning: null,
+      title_provenance: "manual",
       updated_at: (requests[1].body as Record<string, unknown>).updated_at,
     });
   } finally {

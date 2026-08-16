@@ -13,9 +13,12 @@ import {
 import {
   aiProviderLabel,
   estimatedAudioCostUsd,
+  estimatedEpisodeTitleCostUsd,
   resolveAiProvider,
+  resolveEpisodeTitleProvider,
   synthesizePodcastAudio,
 } from "../../../../../lib/openai";
+import { finalizeEpisodeTitleAfterNarration } from "../../../../../lib/podcast-title";
 import {
   acquireJobLease,
   EpisodeAudioVariantNotFoundError,
@@ -40,8 +43,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   let leaseStartedAt: string | null = null;
   let jobProvider = "Podcast narrator";
   let estimatedCostUsd = 0;
+  let titleEstimatedCostUsd = 0;
   let reservedCostUsd = 0;
   let providerCallStarted = false;
+  let titleCallStarted = false;
   try {
     ownerId = await currentOwner("editor");
     const { id } = await context.params;
@@ -58,6 +63,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       getDashboardState(ownerId),
     ]);
     if (!episode) return Response.json({ error: "Episode not found." }, { status: 404 });
+    const configuredTitleProvider = episode.titleProvenance === "provisional"
+      ? resolveEpisodeTitleProvider()
+      : null;
+    titleEstimatedCostUsd = estimatedEpisodeTitleCostUsd(
+      configuredTitleProvider,
+    );
     if (requestedVoiceId && !voiceProfile) {
       return Response.json(
         { error: "The selected narrator was not found in this workspace." },
@@ -75,9 +86,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!provider && !hasLocalChatterboxVoice) {
       return Response.json({ error: "No audio provider is configured." }, { status: 400 });
     }
-    estimatedCostUsd = hasLocalChatterboxVoice
+    estimatedCostUsd = (hasLocalChatterboxVoice
       ? 0
-      : estimatedAudioCostUsd(provider);
+      : estimatedAudioCostUsd(provider)) + titleEstimatedCostUsd;
     if (
       !hasBudgetForGeneration(
         initialState.stats.dailySpendUsd,
@@ -92,9 +103,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         { status: 429 },
       );
     }
-    jobProvider = hasLocalChatterboxVoice
+    const narratorLabel = hasLocalChatterboxVoice
       ? "Local Chatterbox"
       : aiProviderLabel(provider);
+    jobProvider = configuredTitleProvider === "gemini"
+      ? `${narratorLabel} + Gemini title`
+      : narratorLabel;
     const variantProvider = hasLocalChatterboxVoice
       ? "chatterbox" as const
       : provider!;
@@ -163,7 +177,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       voiceProfile,
       episode.durationSeconds,
     );
-    const updatedEpisode = await replaceEpisodeAudio(
+    let updatedEpisode = await replaceEpisodeAudio(
       ownerId,
       episode,
       generated.audio,
@@ -178,6 +192,22 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     );
     if (!hasUsableAudioUrl(updatedEpisode.audioUrl)) {
       throw new Error("The generated audio could not be stored with the episode.");
+    }
+    let titleProvider: "gemini" | null = null;
+    let titleError: string | null = null;
+    if (updatedEpisode.titleProvenance === "provisional") {
+      titleCallStarted = true;
+      const finalizedTitle = await finalizeEpisodeTitleAfterNarration(
+        ownerId,
+        updatedEpisode,
+        {
+          title: episode.title,
+          script: episode.script,
+        },
+      );
+      updatedEpisode = finalizedTitle.episode;
+      titleProvider = finalizedTitle.titleProvider;
+      titleError = finalizedTitle.titleError;
     }
     const generatedVariant = updatedEpisode.audioVariants?.find(
       (variant) => variant.voiceKey === voiceKey,
@@ -195,7 +225,10 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         stage: "Podcast narration",
         status: "completed",
         provider: jobProvider,
-        costUsd: reservedCostUsd,
+        costUsd: Math.max(
+          0,
+          reservedCostUsd - (titleCallStarted ? 0 : titleEstimatedCostUsd),
+        ),
       });
       if (!finished) {
         console.warn(
@@ -225,6 +258,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     return Response.json({
       ...reconciled,
       audioVariantId: generatedVariant.id,
+      titleProvider,
+      titleError,
     });
   } catch (error) {
     if (ownerId && jobId && leaseStartedAt) {
@@ -237,7 +272,11 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
           status: "failed",
           provider: jobProvider,
           costUsd: providerCallStarted
-            ? reservedCostUsd
+            ? Math.max(
+                0,
+                reservedCostUsd -
+                  (titleCallStarted ? 0 : titleEstimatedCostUsd),
+              )
             : Math.max(0, reservedCostUsd - estimatedCostUsd),
           error: error instanceof Error ? error.message : String(error),
         });

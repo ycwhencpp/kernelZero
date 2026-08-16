@@ -343,6 +343,8 @@ export function DashboardClient({
       const payload = await requestJson<{
         episode: Episode;
         provider: "openai" | "gemini" | "ollama";
+        titleProvider?: "gemini" | null;
+        titleError?: string | null;
         state: DashboardState;
         audioError?: string;
         sourceSelectionNotice?: string;
@@ -384,13 +386,17 @@ export function DashboardClient({
       }
       const completionMessage = payload.audioError
         ? `${payload.audioError} Use Generate Audio to retry.`
+        : payload.titleError
+          ? `Audio is ready. ${payload.titleError}`
         : generated.episode.generationWarning === "length_below_target"
           ? "Draft saved, but the transcript runs short of the selected episode length."
           : generated.episode.generationWarning
           ? "Draft saved, but its title needs review before publishing."
           : regeneration
             ? "Draft regenerated from the current version and is ready for review."
-            : "Evidence-checked script and local audio are ready for review.";
+            : payload.titleProvider === "gemini"
+              ? "Evidence-checked script, local audio, and Gemini title are ready for review."
+              : "Evidence-checked script and local audio are ready for review.";
       notify(
         payload.sourceSelectionNotice
           ? `${completionMessage} ${payload.sourceSelectionNotice}`
@@ -839,6 +845,40 @@ export function DashboardClient({
     }
   };
 
+  const regenerateEpisodeTitle = async (episodeId: string) => {
+    setBusy(`title:${episodeId}`);
+    try {
+      const payload = await requestJson<{
+        episode: Episode;
+        provider: "gemini";
+        attempts: number;
+        titleNeedsReview: boolean;
+        state: DashboardState;
+      }>(`/api/episodes/${encodeURIComponent(episodeId)}/title`, {
+        method: "POST",
+      });
+      setState(payload.state);
+      notify(
+        payload.titleNeedsReview
+          ? "Gemini generated a new title, but it still needs review."
+          : "Podcast title regenerated with Gemini.",
+      );
+    } catch (error) {
+      try {
+        setState(await requestJson<DashboardState>("/api/state"));
+      } catch {
+        // Keep the current screen usable when the best-effort refresh fails.
+      }
+      notify(
+        error instanceof Error
+          ? error.message
+          : "Unable to regenerate the podcast title.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const generateLinkedInPost = async (
     episodeId: string,
   ): Promise<string | null> => {
@@ -926,6 +966,8 @@ export function DashboardClient({
         episode: Episode;
         state: DashboardState;
         audioVariantId: string;
+        titleProvider?: "gemini" | null;
+        titleError?: string | null;
       }>(`/api/episodes/${encodeURIComponent(episodeId)}/audio`, {
         method: "POST",
         body: voiceId ? JSON.stringify({ voiceId }) : undefined,
@@ -948,10 +990,15 @@ export function DashboardClient({
         episodeWithAudioVariant(generated.episode, generatedVariant),
         generatedVariant.id,
       );
+      const audioMessage = hadSelectedVoiceVariant
+        ? `${selectedVoice?.name ?? "The selected narrator"} audio was regenerated.`
+        : `${selectedVoice?.name ?? "The selected narrator"} was added as a voice version.`;
       notify(
-        hadSelectedVoiceVariant
-          ? `${selectedVoice?.name ?? "The selected narrator"} audio was regenerated.`
-          : `${selectedVoice?.name ?? "The selected narrator"} was added as a voice version.`,
+        payload.titleError
+          ? `${audioMessage} ${payload.titleError}`
+          : payload.titleProvider === "gemini"
+            ? `${audioMessage} Gemini created the final title.`
+            : audioMessage,
       );
     } catch (error) {
       if (!hadAudio) setAudioStatus("missing");
@@ -1211,6 +1258,9 @@ export function DashboardClient({
             }
             onPlaybackRateChange={changePlaybackRate}
             onEdit={(draft) => editEpisode(reviewEpisode.id, draft)}
+            onRegenerateTitle={() =>
+              void regenerateEpisodeTitle(reviewEpisode.id)
+            }
             onGenerateLinkedInPost={() =>
               generateLinkedInPost(reviewEpisode.id)
             }

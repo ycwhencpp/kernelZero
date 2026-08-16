@@ -1,4 +1,9 @@
 export type AiProvider = "openai" | "gemini" | "ollama";
+export type EpisodeTitleProvider = "gemini";
+
+export function configuredEpisodeTitleProviderMode(): string {
+  return (process.env.EPISODE_TITLE_PROVIDER ?? "").trim().toLowerCase();
+}
 
 function resolveAiProviderMode(mode: string): AiProvider | null {
   const normalizedMode = mode.trim().toLowerCase();
@@ -28,6 +33,13 @@ export function resolveLinkedInPostProvider(): AiProvider | null {
     : resolveAiProvider();
 }
 
+export function resolveEpisodeTitleProvider(): EpisodeTitleProvider | null {
+  const mode = configuredEpisodeTitleProviderMode();
+  if (!mode) return null;
+  if (mode === "gemini" && process.env.GEMINI_API_KEY) return "gemini";
+  return null;
+}
+
 export function aiProviderLabel(provider: AiProvider | null): string {
   if (provider === "gemini") return "Gemini";
   if (provider === "openai") return "OpenAI";
@@ -49,4 +61,11 @@ export function estimatedAudioCostUsd(provider: AiProvider | null): number {
   if (provider === "openai") return 0.1;
   if (provider === "gemini") return 0.08;
   return 0;
+}
+
+/** Conservative allowance for a final-title request plus bounded retries. */
+export function estimatedEpisodeTitleCostUsd(
+  provider: EpisodeTitleProvider | null,
+): number {
+  return provider === "gemini" ? 0.01 : 0;
 }
