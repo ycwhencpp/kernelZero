@@ -22,6 +22,7 @@ from scripts.chatterbox_tts import (
     should_prefer_slow_fallback,
     slow_fallback_floor_words_per_minute,
     validate_generated_audio,
+    validate_segment_speaking_rate,
     validate_speaking_rate,
 )
 
@@ -70,6 +71,37 @@ class ChatterboxWorkerTests(unittest.TestCase):
             validate_speaking_rate(129.9, 130.0, 190.0)
         with self.assertRaisesRegex(ValueError, "130-190 WPM"):
             validate_speaking_rate(190.1, 130.0, 190.0)
+
+    def test_one_word_segments_use_a_bounded_duration_instead_of_wpm(self) -> None:
+        validate_segment_speaking_rate(0.8, 1, 75.0, 130.0, 190.0)
+        with self.assertRaisesRegex(ValueError, "short utterance"):
+            validate_segment_speaking_rate(3.0, 1, 20.0, 130.0, 190.0)
+        with self.assertRaisesRegex(ValueError, "130-190 WPM"):
+            validate_segment_speaking_rate(1.0, 2, 120.0, 130.0, 190.0)
+
+    def test_clear_one_word_segment_is_accepted_without_retries(self) -> None:
+        clear_short_audio = torch.full((1, 800), 0.1)
+        model = FakeModel([clear_short_audio])
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr):
+            generated = generate_validated_segment(
+                model=model,
+                text="requirements.",
+                index=35,
+                retry_epoch=0,
+                repetition_penalty=1.2,
+                temperature=0.8,
+                top_p=0.95,
+                min_words_per_minute=130.0,
+                max_words_per_minute=190.0,
+                max_tempo_adjustment=0.15,
+            )
+
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(generated.numel(), clear_short_audio.numel())
+        self.assertIn('"status":"accepted"', stderr.getvalue())
+        self.assertNotIn("recovery_rejected", stderr.getvalue())
 
     def test_slow_fallback_selects_fastest_bounded_candidate(self) -> None:
         minimum = slow_fallback_floor_words_per_minute(130.0, 0.15)

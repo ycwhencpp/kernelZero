@@ -1,4 +1,32 @@
-export const MAX_OLLAMA_PODCAST_SOURCES = 5;
+import type { ContentItem } from "./types";
+
+export const MAX_BRIEFING_SOURCES = 5;
+export const MAX_OLLAMA_PODCAST_SOURCES = MAX_BRIEFING_SOURCES;
+
+export function isReadyTopicBriefingBundle(
+  items: readonly ContentItem[],
+  enabledSourceIds: readonly string[],
+  expectedSourceCount = MAX_BRIEFING_SOURCES,
+): boolean {
+  const expected = Number.isFinite(expectedSourceCount)
+    ? Math.max(1, Math.min(MAX_BRIEFING_SOURCES, Math.floor(expectedSourceCount)))
+    : MAX_BRIEFING_SOURCES;
+  if (items.length !== expected) return false;
+
+  const enabled = new Set(enabledSourceIds);
+  const selected = new Set<string>();
+  for (const item of items) {
+    if (
+      item.kind !== "blog" ||
+      item.processingState !== "ready" ||
+      !item.sourceId ||
+      !enabled.has(item.sourceId) ||
+      selected.has(item.sourceId)
+    ) return false;
+    selected.add(item.sourceId);
+  }
+  return selected.size === expected;
+}
 
 export function uniquePodcastSourceIds(value: unknown): string[] {
   if (!Array.isArray(value)) return [];

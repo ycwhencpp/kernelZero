@@ -7,15 +7,18 @@ import {
 import {
   aiProviderLabel,
   estimatedAudioCostUsd,
+  estimatedEpisodeTitleCostUsd,
   estimatedGenerationCostUsd,
   generatePodcast,
   resolveAiProvider,
+  resolveEpisodeTitleProvider,
   synthesizePodcastAudio,
 } from "../../../../lib/openai";
 import { hasUsableAudioUrl } from "../../../../lib/generated-episode";
 import { discoverResearch } from "../../../../lib/research";
 import { fetchFeed } from "../../../../lib/rss";
 import { createPipelineTraceId } from "../../../../lib/pipeline-log";
+import { finalizeEpisodeTitleAfterNarration } from "../../../../lib/podcast-title";
 import {
   hydratePodcastSources,
   storeSourceDocuments,
@@ -183,28 +186,37 @@ export async function GET(request: Request) {
     return Response.json({ status: "paused", message: "Daily generation is disabled in workspace settings." });
   }
   const provider = resolveAiProvider();
+  const configuredTitleProvider = resolveEpisodeTitleProvider();
   const usesLocalNarrator = Boolean(initialState.voiceProfile);
-  const freshEstimatedCostUsd = estimatedGenerationCostUsd(
-    provider,
-    !usesLocalNarrator,
+  const titleEstimatedCostUsd = estimatedEpisodeTitleCostUsd(
+    configuredTitleProvider,
   );
+  const freshEstimatedCostUsd =
+    estimatedGenerationCostUsd(provider, !usesLocalNarrator) +
+    titleEstimatedCostUsd;
+  const checkpointHasAudio = Boolean(
+    checkpointEpisode && hasUsableAudioUrl(checkpointEpisode.audioUrl),
+  );
+  const checkpointNeedsTitle =
+    checkpointEpisode?.titleProvenance === "provisional";
   const attemptEstimatedCostUsd = checkpointEpisode
-    ? usesLocalNarrator
-      ? 0
-      : estimatedAudioCostUsd(provider)
+    ? (checkpointHasAudio || usesLocalNarrator
+        ? 0
+        : estimatedAudioCostUsd(provider)) +
+      (checkpointNeedsTitle ? titleEstimatedCostUsd : 0)
     : freshEstimatedCostUsd;
-  const configuredNarrator = initialState.voiceProfile
+  const narratorLabel = initialState.voiceProfile
     ? "Local Chatterbox"
     : aiProviderLabel(provider);
-  if (checkpointEpisode && hasUsableAudioUrl(checkpointEpisode.audioUrl)) {
-    if (existingJob?.status !== "completed") {
-      await finalizeDailyJob(
-        ownerId,
-        jobId,
-        configuredNarrator,
-        existingJob?.costUsd ?? freshEstimatedCostUsd,
-      );
-    }
+  const configuredNarrator = configuredTitleProvider === "gemini" &&
+      (checkpointEpisode ? checkpointNeedsTitle : true)
+    ? `${narratorLabel} + Gemini title`
+    : narratorLabel;
+  if (
+    checkpointHasAudio &&
+    existingJob?.status === "completed" &&
+    !checkpointNeedsTitle
+  ) {
     return Response.json({
       status: "already_completed",
       episode: checkpointEpisode,
@@ -289,6 +301,8 @@ export async function GET(request: Request) {
     }
     if (checkpointEpisode) {
       let resumedEpisode = checkpointEpisode;
+      let titleProvider: "gemini" | null = null;
+      let titleError: string | null = null;
       if (!hasUsableAudioUrl(checkpointEpisode.audioUrl)) {
         const speech = await synthesizePodcastAudio(
           checkpointEpisode.script,
@@ -314,6 +328,18 @@ export async function GET(request: Request) {
         );
         await assertLeaseOwned();
       }
+      const finalizedTitle = await finalizeEpisodeTitleAfterNarration(
+        ownerId,
+        resumedEpisode,
+        {
+          title: checkpointEpisode.title,
+          script: checkpointEpisode.script,
+        },
+      );
+      resumedEpisode = finalizedTitle.episode;
+      titleProvider = finalizedTitle.titleProvider;
+      titleError = finalizedTitle.titleError;
+      await assertLeaseOwned();
       const completionToken = await stopLeaseHeartbeat();
       await finalizeDailyJob(
         ownerId,
@@ -326,8 +352,10 @@ export async function GET(request: Request) {
         status: "completed",
         resumed: true,
         discovered: 0,
-        warnings: [],
+        warnings: titleError ? [titleError] : [],
         episode: resumedEpisode,
+        titleProvider,
+        titleError,
         narration: voiceProfile ? "local_chatterbox" : "system_voice",
       });
     }
@@ -410,7 +438,7 @@ export async function GET(request: Request) {
       throw new Error("Audio was requested, but the narrator returned no audio data.");
     }
     await assertLeaseOwned();
-    const episode = await replaceEpisodeAudio(
+    let episode = await replaceEpisodeAudio(
       ownerId,
       generated.episode,
       generated.audio,
@@ -426,11 +454,24 @@ export async function GET(request: Request) {
       },
     );
     await assertLeaseOwned();
+    const finalizedTitle = await finalizeEpisodeTitleAfterNarration(
+      ownerId,
+      episode,
+      {
+        title: generated.episode.title,
+        script: generated.episode.script,
+      },
+    );
+    episode = finalizedTitle.episode;
+    if (finalizedTitle.titleError) warnings.push(finalizedTitle.titleError);
+    await assertLeaseOwned();
     const completionToken = await stopLeaseHeartbeat();
     await finalizeDailyJob(
       ownerId,
       jobId,
-      aiProviderLabel(generated.provider),
+      configuredTitleProvider === "gemini"
+        ? `${aiProviderLabel(generated.provider)} + Gemini title`
+        : aiProviderLabel(generated.provider),
       leaseCostUsd,
       completionToken,
     );
@@ -440,6 +481,8 @@ export async function GET(request: Request) {
       discovered: discovered.length,
       warnings,
       episode,
+      titleProvider: finalizedTitle.titleProvider,
+      titleError: finalizedTitle.titleError,
       narration: voiceProfile ? "local_chatterbox" : "system_voice",
     });
   } catch (error) {

@@ -2946,57 +2946,249 @@ img {
   gap: 20px;
 }
 
-.organic-source-pick-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 16px;
+.organic-topic-panel > .organic-panel-head {
+  align-items: flex-start;
 }
 
-.organic-source-pick {
-  position: relative;
-  min-height: 100px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  text-align: left;
-}
-
-.organic-source-pick.is-selected {
-  border-color: var(--lime-dark);
-  box-shadow: inset 0 0 0 1px var(--lime-dark);
-}
-
-.organic-source-pick:disabled {
-  cursor: not-allowed;
-  opacity: 0.48;
-}
-
-.organic-source-pick.dashed {
-  border-style: dashed;
+.organic-topic-panel > .organic-panel-head p {
+  margin: 5px 0 0;
   color: var(--muted);
+  font-size: 13px;
 }
 
-.organic-source-pick .check {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  color: var(--lime-dark);
+.organic-topic-add {
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.organic-topic-add label,
+.organic-topic-add small {
+  display: block;
+}
+
+.organic-topic-add label {
+  margin-bottom: 7px;
+  font-size: 12px;
   font-weight: 700;
 }
 
-.organic-source-pick strong {
-  display: block;
-  font-size: 14px;
+.organic-topic-add > div {
+  display: flex;
+  gap: 8px;
 }
 
-.organic-source-pick small {
-  display: block;
-  margin-top: 6px;
-  font-size: 11px;
-  letter-spacing: 0.06em;
+.organic-topic-add input {
+  min-width: 0;
+  flex: 1;
+  height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.organic-topic-add small {
+  margin-top: 7px;
   color: var(--muted);
+  font-size: 10px;
+}
+
+.organic-topic-message {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.organic-topic-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.organic-topic-card {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f8f8f4;
+  cursor: pointer;
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.organic-topic-card:hover {
+  border-color: #8c968e;
+  transform: translateY(-1px);
+}
+
+.organic-topic-card.is-selected {
+  border-color: var(--lime-dark);
+  box-shadow: 0 0 0 2px rgba(69, 104, 0, 0.18);
+}
+
+.organic-topic-card > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  opacity: 0;
+}
+
+.organic-topic-card:focus-within {
+  outline: 3px solid rgba(109, 140, 255, 0.35);
+  outline-offset: 2px;
+}
+
+.organic-topic-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px;
+  border-bottom: 1px solid rgba(195, 200, 195, 0.65);
+  background: linear-gradient(135deg, rgba(185, 239, 101, 0.24), rgba(255, 255, 255, 0.78));
+}
+
+.organic-topic-card-head > span:first-child {
+  min-width: 0;
+}
+
+.organic-topic-card-head small,
+.organic-topic-card-head strong {
+  display: block;
+}
+
+.organic-topic-card-head small {
+  margin-bottom: 4px;
+  color: var(--lime-dark);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.organic-topic-card-head strong {
+  overflow: hidden;
+  font-family: var(--font-serif);
+  font-size: 23px;
+  font-weight: 500;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+}
+
+.organic-topic-card-count {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: var(--sidebar);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.organic-topic-blog-list {
+  display: block;
+  flex: 1;
+  padding: 0 16px;
+}
+
+.organic-topic-blog-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 66px;
+  padding: 9px 0;
+  border-bottom: 1px solid rgba(195, 200, 195, 0.58);
+}
+
+.organic-topic-blog-row:last-child {
+  border-bottom: 0;
+}
+
+.organic-topic-blog-index {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--sidebar);
+  color: var(--lime);
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.organic-topic-blog-copy {
+  min-width: 0;
+}
+
+.organic-topic-blog-copy strong,
+.organic-topic-blog-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.organic-topic-blog-copy strong {
+  display: -webkit-box;
+  font-size: 12px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.organic-topic-blog-copy small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.organic-topic-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 46px;
+  padding: 10px 16px;
+  border-top: 1px solid rgba(195, 200, 195, 0.65);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.organic-topic-card-foot strong {
+  color: var(--lime-dark);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.organic-topic-empty {
+  margin-top: 20px;
+  padding: 32px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.organic-topic-empty strong {
+  color: var(--ink);
+}
+
+.organic-topic-empty p {
+  margin: 6px 0 16px;
 }
 
 .organic-depth-list {
@@ -3206,6 +3398,10 @@ img {
     grid-column: auto;
   }
 
+  .organic-topic-card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .organic-filters {
     grid-template-columns: 1fr;
   }
@@ -3345,6 +3541,19 @@ img {
   .organic-review,
   .organic-create {
     margin-inline: -16px;
+  }
+
+  .organic-topic-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .organic-topic-add > div {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .organic-topic-add .organic-btn {
+    min-height: 44px;
   }
 }
 

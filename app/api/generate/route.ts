@@ -5,9 +5,11 @@ import {
 } from "../../../lib/domain";
 import {
   aiProviderLabel,
+  estimatedEpisodeTitleCostUsd,
   estimatedGenerationCostUsd,
   generatePodcast,
   resolveAiProvider,
+  resolveEpisodeTitleProvider,
 } from "../../../lib/openai";
 import {
   hasUsableAudioUrl,
@@ -22,6 +24,8 @@ import {
   replaceEpisodeAudio,
 } from "../../../lib/store";
 import { normalizeEpisodeLength } from "../../../lib/podcast-length";
+import { normalizePodcastFocus } from "../../../lib/podcast-focus";
+import { finalizeEpisodeTitleAfterNarration } from "../../../lib/podcast-title";
 import {
   episodeSourceItemIds,
   parsePodcastRegenerationContext,
@@ -29,7 +33,9 @@ import {
 import { createPipelineTraceId } from "../../../lib/pipeline-log";
 import { hydratePodcastSources } from "../../../lib/source-documents";
 import {
+  isReadyTopicBriefingBundle,
   limitPodcastSourceIds,
+  MAX_BRIEFING_SOURCES,
   MAX_OLLAMA_PODCAST_SOURCES,
   uniquePodcastSourceIds,
 } from "../../../lib/podcast-source-selection";
@@ -79,6 +85,7 @@ export async function POST(request: Request) {
       episodeLength?: EpisodeLength;
       episodeId?: string;
       topic?: string;
+      focusTopic?: unknown;
       currentDraft?: string;
     };
     let regeneration;
@@ -121,11 +128,35 @@ export async function POST(request: Request) {
       );
     }
     const type = sourceEpisode?.type ?? body.type ?? "paper_deep_dive";
+    const focusTopic = regeneration
+      ? undefined
+      : normalizePodcastFocus(body.focusTopic);
+    if (!regeneration && body.focusTopic !== undefined && !focusTopic) {
+      return Response.json(
+        { error: "Choose a valid podcast topic." },
+        { status: 400 },
+      );
+    }
+    if (focusTopic && type !== "daily_digest") {
+      return Response.json(
+        { error: "Topic cards can only generate briefing episodes." },
+        { status: 400 },
+      );
+    }
     const provider = resolveAiProvider();
-    const estimatedCostUsd = estimatedGenerationCostUsd(
-      provider,
-      body.includeAudio ?? true,
+    const needsAudio = body.includeAudio ?? true;
+    const configuredTitleProvider = needsAudio
+      ? resolveEpisodeTitleProvider()
+      : null;
+    const titleEstimatedCostUsd = estimatedEpisodeTitleCostUsd(
+      configuredTitleProvider,
     );
+    const estimatedCostUsd =
+      estimatedGenerationCostUsd(provider, needsAudio) +
+      titleEstimatedCostUsd;
+    const generationProviderLabel = configuredTitleProvider === "gemini"
+      ? `${aiProviderLabel(provider)} + Gemini title`
+      : aiProviderLabel(provider);
     if (
       !hasBudgetForGeneration(
         state.stats.dailySpendUsd,
@@ -143,6 +174,19 @@ export async function POST(request: Request) {
     const requestedItemIds = sourceEpisode
       ? episodeSourceItemIds(state, sourceEpisode)
       : uniquePodcastSourceIds(body.itemIds);
+    if (
+      !regeneration &&
+      type === "daily_digest" &&
+      requestedItemIds.length > MAX_BRIEFING_SOURCES
+    ) {
+      return Response.json(
+        {
+          error:
+            `Choose no more than ${MAX_BRIEFING_SOURCES} ready sources for a briefing.`,
+        },
+        { status: 400 },
+      );
+    }
     let sourceSelectionNotice: string | undefined;
     let itemIds = requestedItemIds;
     if (
@@ -165,6 +209,12 @@ export async function POST(request: Request) {
       );
     }
     let items = await findItems(ownerId, itemIds);
+    if (!regeneration && itemIds.length > 0 && items.length !== itemIds.length) {
+      return Response.json(
+        { error: "One or more selected blogs are no longer available." },
+        { status: 400 },
+      );
+    }
     if (regeneration && items.length !== itemIds.length) {
       return Response.json(
         { error: "One or more original sources for this draft are no longer available." },
@@ -172,7 +222,31 @@ export async function POST(request: Request) {
       );
     }
     if (!regeneration && type === "daily_digest" && items.length === 0) {
-      items = selectDigestItems(state.items, MAX_OLLAMA_PODCAST_SOURCES);
+      items = selectDigestItems(state.items, MAX_BRIEFING_SOURCES);
+    }
+    if (focusTopic) {
+      if (items.length !== MAX_BRIEFING_SOURCES) {
+        return Response.json(
+          {
+            error:
+              `A topic briefing requires exactly ${MAX_BRIEFING_SOURCES} ready blogs from different sources.`,
+          },
+          { status: 400 },
+        );
+      }
+      const enabledSourceIds =
+        state.sources
+          .filter((source) => source.enabled)
+          .map((source) => source.id);
+      if (!isReadyTopicBriefingBundle(items, enabledSourceIds)) {
+        return Response.json(
+          {
+            error:
+              "Topic briefings require one ready blog from each of five enabled, connected sources.",
+          },
+          { status: 400 },
+        );
+      }
     }
     if (items.length === 0) {
       return Response.json(
@@ -180,20 +254,6 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    if (
-      provider === "ollama" &&
-      items.length > MAX_OLLAMA_PODCAST_SOURCES
-    ) {
-      return Response.json(
-        {
-          error:
-            `Choose no more than ${MAX_OLLAMA_PODCAST_SOURCES} ready sources for Ollama generation.`,
-        },
-        { status: 400 },
-      );
-    }
-
-    const needsAudio = body.includeAudio ?? true;
     const voiceProfile = needsAudio ? await getActiveVoiceProfile(ownerId) : null;
     if (needsAudio && process.env.REQUIRE_LOCAL_VOICE === "true" && !voiceProfile) {
       return Response.json(
@@ -212,7 +272,7 @@ export async function POST(request: Request) {
       id: jobId,
       stage: type === "daily_digest" ? "Daily digest" : "Deep-dive podcast",
       status: "running",
-      provider: aiProviderLabel(provider),
+      provider: generationProviderLabel,
     });
     const traceId = createPipelineTraceId("manual-podcast");
     const sourceCorpus = provider === "ollama"
@@ -239,7 +299,7 @@ export async function POST(request: Request) {
           stage: "Podcast narration",
           status: "failed",
           provider: aiProviderLabel(failedProvider),
-          costUsd: estimatedCostUsd,
+          costUsd: Math.max(0, estimatedCostUsd - titleEstimatedCostUsd),
           error: internalError,
         });
       } catch (jobError) {
@@ -280,6 +340,7 @@ export async function POST(request: Request) {
         includeAudio: needsAudio,
         voiceProfile,
         episodeLength: normalizeEpisodeLength(body.episodeLength ?? state.settings.episodeLength),
+        focusTopic,
         regeneration,
         sourceCorpus,
         traceId,
@@ -363,6 +424,22 @@ export async function POST(request: Request) {
       }
     }
 
+    let titleProvider: "gemini" | null = null;
+    let titleError: string | null = null;
+    if (needsAudio && hasUsableAudioUrl(episode.audioUrl)) {
+      const finalizedTitle = await finalizeEpisodeTitleAfterNarration(
+        ownerId,
+        episode,
+        {
+          title: generated.episode.title,
+          script: generated.episode.script,
+        },
+      );
+      episode = finalizedTitle.episode;
+      titleProvider = finalizedTitle.titleProvider;
+      titleError = finalizedTitle.titleError;
+    }
+
     let refreshedState = state;
     let stateIsAuthoritative = false;
     try {
@@ -386,7 +463,9 @@ export async function POST(request: Request) {
     try {
       const completedAt = new Date().toISOString();
       const stage = type === "daily_digest" ? "Daily digest" : "Deep-dive podcast";
-      const providerLabel = aiProviderLabel(generated.provider);
+      const providerLabel = configuredTitleProvider === "gemini"
+        ? `${aiProviderLabel(generated.provider)} + Gemini title`
+        : aiProviderLabel(generated.provider);
       await recordJob(ownerId, {
         id: jobId,
         stage,
@@ -432,6 +511,8 @@ export async function POST(request: Request) {
     return Response.json({
       episode: storedEpisode,
       provider: generated.provider,
+      titleProvider,
+      titleError,
       state: responseState,
       sourceSelectionNotice,
     });

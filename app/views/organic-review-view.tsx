@@ -47,6 +47,7 @@ export function OrganicReviewView({
   backLabel,
   onBack,
   onApprove,
+  onRegenerateTitle,
   onRegenerateDraft,
   onPreview,
   onSeek,
@@ -76,6 +77,7 @@ export function OrganicReviewView({
   backLabel: string;
   onBack: () => void;
   onApprove: (overrideTitleWarning?: boolean) => void;
+  onRegenerateTitle: () => void;
   onRegenerateDraft: (currentDraft: string) => void;
   onPreview: () => void;
   onSeek: (seconds: number) => void;
@@ -168,6 +170,7 @@ export function OrganicReviewView({
     selectedNarratorVariant?.voiceName ??
     "system voice";
   const audioGenerationBusy = busy === `audio:${episode.id}`;
+  const titleGenerationBusy = busy === `title:${episode.id}`;
   const selectedVariantIsDefault = Boolean(
     activeAudioVariant &&
       (activeAudioVariant.id === defaultAudioVariant?.id ||
@@ -421,6 +424,24 @@ export function OrganicReviewView({
           <span>{titleCase(episode.status)}</span>
         </div>
         <div className="organic-review-actions">
+          {canEditDraft && (
+            <button
+              type="button"
+              className="organic-btn organic-btn-outline"
+              disabled={busy !== null || editing}
+              aria-busy={titleGenerationBusy}
+              title={
+                editing
+                  ? "Save or cancel transcript edits before regenerating the title."
+                  : undefined
+              }
+              onClick={onRegenerateTitle}
+            >
+              {titleGenerationBusy
+                ? "Regenerating Title…"
+                : "Regenerate Title"}
+            </button>
+          )}
           <button
             type="button"
             className="organic-btn organic-btn-outline"

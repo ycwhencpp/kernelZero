@@ -79,6 +79,11 @@ export async function PATCH(
             ? "length_below_target"
             : null)
         : undefined,
+      // Once an editor changes either input, a later audio retry must never
+      // replace that authored title with the deferred Gemini pass.
+      titleProvenance: titleChanged || scriptChanged
+        ? "manual"
+        : undefined,
     });
     return Response.json({ state: await getDashboardState(ownerId) });
   } catch (error) {

@@ -48,6 +48,30 @@ def validate_speaking_rate(
         )
 
 
+def validate_segment_speaking_rate(
+    duration: float,
+    word_count: int,
+    words_per_minute: float,
+    min_words_per_minute: float,
+    max_words_per_minute: float,
+) -> None:
+    """Use an absolute duration guard when WPM is meaningless for tiny text."""
+    if word_count < 1:
+        raise ValueError("Chatterbox segment contains no spoken words.")
+    if word_count == 1:
+        if not 0.6 <= duration <= 2.5:
+            raise ValueError(
+                "Chatterbox short utterance is outside the configured "
+                "0.6-2.5 second duration range."
+            )
+        return
+    validate_speaking_rate(
+        words_per_minute,
+        min_words_per_minute,
+        max_words_per_minute,
+    )
+
+
 def slow_fallback_floor_words_per_minute(
     min_words_per_minute: float,
     max_tempo_adjustment: float,
@@ -277,7 +301,9 @@ def generate_segment_attempt(
         )
         validate_generated_audio(candidate, text, model.sr)
         clear_audio = True
-        validate_speaking_rate(
+        validate_segment_speaking_rate(
+            duration,
+            word_count,
             words_per_minute,
             min_words_per_minute,
             max_words_per_minute,

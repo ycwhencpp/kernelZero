@@ -200,6 +200,11 @@ export function prepareForChatterbox(script: string): string {
   const paragraphs = script
     .normalize("NFKC")
     .replace(/\r\n?/g, "\n")
+    // Structured model output can occasionally preserve escaped newlines as
+    // literal text. Only clear newline-shaped tokens; leave paths such as
+    // C:\network untouched.
+    .replace(/(?:\\r\\n|\\n|\\r){2,}/g, "\n\n")
+    .replace(/(?:\\r\\n|\\n|\\r)(?=\s|$)/g, "\n")
     .replace(/\[([^\]]+)\]\((?:https?:\/\/)?[^)]+\)/gi, "$1")
     .replace(SPEECH_MARKUP_TAG, " ")
     .replace(/https?:\/\/\S+/gi, "")
@@ -258,6 +263,54 @@ function pauseAfterSegment(
   return Math.max(180, Math.min(900, pauseMs));
 }
 
+const MIN_CHATTERBOX_TAIL_WORDS = 8;
+
+/**
+ * Avoids sending Chatterbox an undersized tail created by a greedy split
+ * inside one long sentence. Speaking-rate measurements on such fragments are
+ * too noisy to be useful, and the isolated delivery sounds unnatural even
+ * when generation succeeds.
+ */
+function rebalanceChatterboxTails(
+  chunks: readonly string[],
+  maxCharacters: number,
+): string[] {
+  const balanced = [...chunks];
+  for (let index = 1; index < balanced.length; index += 1) {
+    const previous = balanced[index - 1];
+    const current = balanced[index];
+    const previousWords = previous.split(/\s+/).filter(Boolean);
+    const currentWords = current.split(/\s+/).filter(Boolean);
+    if (
+      currentWords.length >= MIN_CHATTERBOX_TAIL_WORDS ||
+      previousWords.length <= MIN_CHATTERBOX_TAIL_WORDS
+    ) continue;
+
+    let movedWord = false;
+    while (
+      currentWords.length < MIN_CHATTERBOX_TAIL_WORDS &&
+      previousWords.length > MIN_CHATTERBOX_TAIL_WORDS
+    ) {
+      const nextWord = previousWords.at(-1)!;
+      if ([nextWord, ...currentWords].join(" ").length > maxCharacters) break;
+      previousWords.pop();
+      currentWords.unshift(nextWord);
+      movedWord = true;
+    }
+    const rebalancedPrevious = previousWords.join(" ");
+    const rebalancedCurrent = currentWords.join(" ");
+    if (
+      movedWord &&
+      rebalancedPrevious.length <= maxCharacters &&
+      rebalancedCurrent.length <= maxCharacters
+    ) {
+      balanced[index - 1] = rebalancedPrevious;
+      balanced[index] = rebalancedCurrent;
+    }
+  }
+  return balanced;
+}
+
 /**
  * Builds an audio-only performance plan. Native Chatterbox tags never leak
  * into the saved transcript, and explicit silence carries the real pauses.
@@ -274,7 +327,10 @@ export function prepareChatterboxSegments(
   const segments: ChatterboxNarrationSegment[] = [];
 
   for (const paragraph of prepared.split(/\n{2,}/).filter(Boolean)) {
-    const chunks = chunkForSpeech(paragraph, chunkLimit);
+    const chunks = rebalanceChatterboxTails(
+      chunkForSpeech(paragraph, chunkLimit),
+      chunkLimit,
+    );
     chunks.forEach((chunk, index) => {
       const delivery = deliveryForText(chunk);
       const text = delivery.tag ? `${delivery.tag} ${chunk}` : chunk;

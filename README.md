@@ -29,7 +29,7 @@ npm run dev
 ```
 
 Create a Supabase project and run every migration in `supabase/migrations/`
-(currently `0001_initial.sql` through `0010_episode_generation_warning.sql`). Enable the
+(currently `0001_initial.sql` through `0013_episode_title_provenance.sql`). Enable the
 Email provider in **Authentication → Providers**, then add
 `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and the
 server-only `SUPABASE_SERVICE_ROLE_KEY` to `.env.local`. Older Supabase projects
@@ -100,7 +100,9 @@ Episode length, daily generation, and publish time are persisted in Supabase. Th
 Production variables:
 
 - `GEMINI_API_KEY` or `OPENAI_API_KEY` (one is enough; optional `AI_PROVIDER=gemini|openai|ollama|auto`)
-- `OLLAMA_BASE_URL`, `OLLAMA_SCRIPT_MODEL`, `OLLAMA_CONSOLIDATION_MODEL`, `OLLAMA_REVIEW_MODEL`, `OLLAMA_METADATA_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `OLLAMA_DIGEST_AUDIT_MODE`, `OLLAMA_DEDUP_SIMILARITY_THRESHOLD`, `OLLAMA_PLANNING_SOURCE_MAX_CHARACTERS`, `OLLAMA_SEGMENT_SOURCE_MAX_CHARACTERS`, `OLLAMA_REVIEW_SOURCE_MAX_CHARACTERS`, `OLLAMA_SEMANTIC_BLOCK_MAX_CHARACTERS`, and role-specific context/output/keep-alive settings (local semantic pipeline)
+- `LINKEDIN_POST_PROVIDER=gemini|openai|ollama|auto` (optional LinkedIn-only override; for Gemini posts with an Ollama podcast pipeline, set this to `gemini` and add `GEMINI_API_KEY`)
+- `EPISODE_TITLE_PROVIDER=gemini` (optional automatic final-title pass; after transcript narration is stored, Gemini replaces the provisional provider title without changing `AI_PROVIDER`; the Review page's **Regenerate Title** button only requires `GEMINI_API_KEY`; optionally override the title model with `GEMINI_EPISODE_TITLE_MODEL` and its 30-second total timeout with `GEMINI_EPISODE_TITLE_TIMEOUT_MS`)
+- `OLLAMA_BASE_URL`, `OLLAMA_SCRIPT_MODEL`, `OLLAMA_CONSOLIDATION_MODEL`, `OLLAMA_REVIEW_MODEL`, `OLLAMA_METADATA_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `OLLAMA_DIGEST_AUDIT_MODE`, `OLLAMA_DEDUP_SIMILARITY_THRESHOLD`, `OLLAMA_REVIEW_TIMEOUT_MS`, `OLLAMA_REVIEW_RETRY_TIMEOUT_MS`, `OLLAMA_PLANNING_SOURCE_MAX_CHARACTERS`, `OLLAMA_SEGMENT_SOURCE_MAX_CHARACTERS`, `OLLAMA_REVIEW_SOURCE_MAX_CHARACTERS`, `OLLAMA_SEMANTIC_BLOCK_MAX_CHARACTERS`, and role-specific context/output/keep-alive settings (local semantic pipeline)
 - `SOURCE_DOCUMENT_FETCH_TIMEOUT_MS`, `SOURCE_DOCUMENT_BATCH_TIMEOUT_MS`, `SOURCE_DOCUMENT_HTML_MAX_BYTES`, `SOURCE_DOCUMENT_PDF_MAX_BYTES`, `SOURCE_DOCUMENT_MAX_CHARACTERS`, `SOURCE_DOCUMENT_MAX_BLOCKS`, and `SOURCE_DOCUMENT_MAX_PDF_PAGES` (selected-source hydration limits)
 - `CHATTERBOX_PYTHON`, `CHATTERBOX_DEVICE`, `CHATTERBOX_CACHE_DIR`, `CHATTERBOX_MAX_TEMPO_ADJUSTMENT`, `CHATTERBOX_MIN_WPM`, `CHATTERBOX_MAX_WPM`, `LOCAL_VOICE_STORAGE_DIR` (optional local Chatterbox settings; out-of-range chunks are retried, then the fastest clear candidate inside a bounded slow-rate tolerance may be retained; fast chunks still fail)
 - `REQUIRE_LOCAL_VOICE=true` to prevent a cron or manual generation from silently falling back to the system voice when no local narrator is configured
